@@ -16,6 +16,7 @@ import {
   setSegmentRoute,
 } from "@/lib/store";
 import { deleteMediaBlob, putMediaBlob } from "@/lib/media";
+import { uid } from "@/lib/uid";
 import type { SearchResult, Transport } from "@/lib/types";
 import { routing } from "@/lib/routing";
 import { TravelMap } from "@/components/TravelMap";
@@ -102,7 +103,7 @@ export default function TripPage() {
   async function handleAddMedia(stopId: string, files: File[]) {
     if (!trip) return;
     for (const f of files) {
-      const id = `media_${crypto.randomUUID()}`;
+      const id = `media_${uid()}`;
       try {
         await putMediaBlob(id, f);
       } catch (e) {

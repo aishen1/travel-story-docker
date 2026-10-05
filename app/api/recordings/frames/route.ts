@@ -118,6 +118,7 @@ async function assemble(dir: string, output: string, fps: number): Promise<void>
       "-rc", "vbr",
       "-cq", "19", // 与 x264 CRF 18 相当的画质档
       "-pix_fmt", "yuv420p",
+      "-color_range", "tv", // JPEG 输入是全范围，不显式指定会被原样带出（yuvj420p/pc），部分播放器按 tv 解析会发灰
       "-movflags", "+faststart",
       output,
     ]);
@@ -132,6 +133,7 @@ async function assemble(dir: string, output: string, fps: number): Promise<void>
       "-preset", "medium",
       "-crf", "18",
       "-pix_fmt", "yuv420p",
+      "-color_range", "tv", // 同上：JPEG 全范围输入必须显式转 tv
       "-movflags", "+faststart",
       output,
     ]);
@@ -140,7 +142,9 @@ async function assemble(dir: string, output: string, fps: number): Promise<void>
 
 function runFfmpeg(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    execFile("ffmpeg", args, { timeout: 280_000 }, (err, _stdout, stderr) => {
+    // 原值 280_000：J1900 上 1080p/medium 实测约 12fps，只能出 ~90 秒片长，
+    // 三天行程的纪录片会直接撞超时。抬到 20 分钟作为硬上限。
+    execFile("ffmpeg", args, { timeout: 1_200_000 }, (err, _stdout, stderr) => {
       if (err) reject(new Error(`ffmpeg 合成失败: ${stderr.slice(-400)}`));
       else resolve();
     });

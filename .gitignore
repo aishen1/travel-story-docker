@@ -31,3 +31,6 @@ data/
 
 # 构建/部署日志
 logs/
+
+# 本机测试产物
+test-artifacts/

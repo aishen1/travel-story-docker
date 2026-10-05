@@ -24,6 +24,7 @@
 
 import { buildTimeline } from "@/lib/map/playback";
 import { formatDistance } from "@/lib/routing";
+import { uid } from "@/lib/uid";
 import type { Timeline } from "@/lib/map/playback";
 import type { TravelMapEngine } from "@/lib/map/engine";
 import type { Trip } from "@/lib/types";
@@ -117,7 +118,7 @@ export function renderOffline({
       // 2. 输出通道：WebCodecs 软件 H.264，不可用则 JPEG 帧序列兜底
       const encConfig = forceJpeg ? null : await pickEncoderConfig(width, height, fps);
       usedWebCodecs = Boolean(encConfig);
-      session = crypto.randomUUID();
+      session = uid();
       const sink: FrameSink = encConfig
         ? createWebCodecsSink(encConfig, width, height, fps, trip.name)
         : createJpegSink(session, trip.name, fps);

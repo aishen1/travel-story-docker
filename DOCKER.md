@@ -22,6 +22,47 @@ docker compose up -d --build
 | `.dockerignore` | 新增 |
 | `next.config.ts` | 增加 `output: "standalone"`，产出最小运行包 |
 | `.gitignore` | 增加 `logs/` |
+| `lib/uid.ts` | 新增。`crypto.randomUUID` 的降级实现 |
+| `app/trip/[id]/page.tsx` | 素材上传的 id 生成改用 `uid()` |
+| `lib/record/offline.ts` | 渲染会话 id 生成改用 `uid()` |
+| `app/api/recordings/frames/route.ts` | 合成超时 280s→20min；补 `-color_range tv` |
+| `app/api/recordings/route.ts` | webm→mp4 转码超时 240s→10min |
+
+## 四、非容器相关的代码级修复（本版新增，均已实测）
+
+上游代码假定「浏览器是安全上下文」，在局域网 `http://<IP>:3000` 访问下有三处会坏：
+
+**1. `crypto.randomUUID is not a function`（致命，阻断上传与出片）**
+`crypto.randomUUID` 只在 HTTPS / localhost 存在，局域网 HTTP 下是 `undefined`，
+而素材上传（`app/trip/[id]/page.tsx`）与纪录片渲染（`lib/record/offline.ts`）都直接调它 ——
+表现是点上传或点生成纪录片直接崩成错误页。新增 `lib/uid.ts` 做三级降级
+（`randomUUID` → `getRandomValues` → `Math.random`），返回形态一致的 UUID v4 字符串。
+
+> 顺带：WebCodecs 的 `VideoEncoder` 同样只在安全上下文存在。
+> 局域网 HTTP 下它会走「JPEG 帧序列 + 服务端 ffmpeg」兜底通道（功能完整，只是慢）。
+
+**2. 服务端合成超时过短**
+`assemble()` 原为 280 秒。实测（本机 J1900，1080p、preset medium）：
+240 帧用 90 秒，线性外推 3105 帧（约 52 秒片长）≈ 1164 秒，**必然超时**。
+改为 1200 秒；`recordings/route.ts` 的转码超时 240 秒改为 600 秒。
+
+**3. 成片色彩范围错误**
+JPEG 帧是全范围（full range），ffmpeg 新版本里 `-pix_fmt yuv420p` 不再隐含范围转换，
+导致成片被标成 `yuvj420p` / `color_range=pc`，部分播放器按 tv 解析会发灰。
+两条编码路径均补 `-color_range tv`。修复前后实测：
+
+```
+修复前: pix_fmt=yuvj420p  color_range=pc
+修复后: pix_fmt=yuv420p   color_range=tv
+```
+
+## 已知限制（上游设计如此，非 bug）
+
+- **跨天路段没有编辑入口**：`normalizeTrip()` 会在**所有相邻地点之间**（跨天也算）自动建段，
+  地图和成片里都生效，默认交通方式为「汽车」；但时间线 UI 只在「同一天内还有下一个节点」时
+  渲染交通方式选择器，所以每天最后一个地点到次日第一个地点那段**看不到也改不了**。
+- **「播放行程」不显示照片/视频**：它只播地图镜头与路线动画；素材仅参与「生成纪录片」。
+- 无鉴权（见下）。
 
 ## 三个踩过的坑（都在本机实测过）
 

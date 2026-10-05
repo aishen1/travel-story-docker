@@ -31,7 +31,8 @@ function transcodeToMp4(input: string, output: string): Promise<void> {
         "-movflags", "+faststart",
         output,
       ],
-      { timeout: 240_000 },
+      // 原 240_000：veryfast 在 J1900 上转 1080p/3min 素材会逼近上限，抬到 10 分钟
+      { timeout: 600_000 },
       (err, _stdout, stderr) => {
         if (err) reject(new Error(`ffmpeg 转码失败: ${stderr.slice(-400)}`));
         else resolve();
