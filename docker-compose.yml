@@ -1,0 +1,27 @@
+services:
+  travel-story:
+    build:
+      context: .
+    image: travel-story:latest
+    container_name: travel-story
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    # 地点搜索密钥（至少配一个才有搜索结果）写在同目录 .env，改完 docker compose up -d 即生效，无需重建镜像
+    environment:
+      GAODE_KEY: ${GAODE_KEY:-}
+      LOCATIONIQ_KEY: ${LOCATIONIQ_KEY:-}
+      MAX_MEDIA_UPLOAD_MB: 250
+      MAX_RECORDING_UPLOAD_MB: 512
+      MAX_FRAME_BATCH_MB: 64
+      MAX_TRIPS_BODY_MB: 10
+      TZ: Asia/Shanghai
+    user: "981:901"
+    volumes:
+      - ./data:/app/data
+      - ./tile-cache:/app/tile-cache
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
