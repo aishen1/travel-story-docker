@@ -6,7 +6,8 @@ import { NextRequest } from "next/server";
 import { execFile } from "child_process";
 import { promises as fs } from "fs";
 import path from "path";
-import { ensureDirs, RECORDINGS_DIR } from "@/lib/server/db";
+import { ensureDirs, findBgm, isTripId, RECORDINGS_DIR, writeRecordingSidecar } from "@/lib/server/db";
+import { muxBackgroundMusic, probeDuration, validateMedia } from "@/lib/server/mediaTools";
 import {
   declaredBodyExceeds,
   getLimitBytes,
@@ -37,6 +38,7 @@ export async function POST(req: NextRequest) {
     if (sp.get("finalize") === "1") {
       // 帧齐了 → 合成 MP4（沿用实时录制的文件命名）
       const tripName = (sp.get("trip") ?? "纪录片").trim() || "纪录片";
+      const tripId = sp.get("tripId") ?? "";
       const fpsRaw = Number(sp.get("fps"));
       const fps = Number.isInteger(fpsRaw) && fpsRaw >= 1 && fpsRaw <= 120 ? fpsRaw : DEFAULT_FPS;
       const safeName = tripName.replace(/[\\/:*?"<>|\s]+/g, "-").slice(0, 40);
@@ -44,17 +46,44 @@ export async function POST(req: NextRequest) {
       const finalFile = `${ts}-${safeName}.mp4`;
       const outPath = path.join(RECORDINGS_DIR, finalFile);
       const frameNames = await fs.readdir(dir).catch(() => []);
-      if (!frameNames.some(isFrameName)) {
+      const frameCount = frameNames.filter(isFrameName).length;
+      if (!frameCount) {
         return Response.json({ error: "missing-frames" }, { status: 400 });
       }
       await assemble(dir, outPath, fps);
+      // 配了背景音乐就混进去（失败保留无声版本，绝不因此丢掉片子）
+      const bgm = isTripId(tripId) ? await findBgm(tripId) : null;
+      let bgmApplied = false;
+      if (bgm) {
+        const tmp = `${outPath}.bgm.mp4`;
+        try {
+          await muxBackgroundMusic(outPath, bgm.path, tmp);
+          await validateMedia(tmp);
+          await fs.rename(tmp, outPath);
+          bgmApplied = true;
+          console.log(`[recordings] 已混入背景音乐：${bgm.meta.name} → ${finalFile}`);
+        } catch (e) {
+          await fs.unlink(tmp).catch(() => {});
+          console.warn("[recordings] 背景音乐混流失败，保留无声成片", e);
+        }
+      }
       await fs.rm(dir, { recursive: true, force: true });
       const stat = await fs.stat(outPath);
+      await writeRecordingSidecar(finalFile, {
+        tripId: isTripId(tripId) ? tripId : undefined,
+        tripName,
+        fps,
+        duration: (await probeDuration(outPath)) ?? undefined,
+        bgm: bgmApplied,
+        createdAt: Date.now(),
+        frames: frameCount,
+      });
       return Response.json({
         ok: true,
         file: finalFile,
         url: `/api/recordings/${finalFile}`,
         size: stat.size,
+        bgm: bgmApplied,
       });
     }
 

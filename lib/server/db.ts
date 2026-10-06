@@ -102,4 +102,205 @@ export async function readMedia(
 export async function deleteMedia(id: string): Promise<void> {
   await fs.unlink(mediaPath(id)).catch(() => {});
   await fs.unlink(sidecarPath(id)).catch(() => {});
+  await fs.unlink(thumbPath(id)).catch(() => {});
+}
+
+// ------------------------------------------------------------
+// 素材缩略图（长边 1280 的 JPEG）
+//
+// 原图动辄 10MB（手机 4000×3000），规划页一屏几十张直接拉原图会卡；
+// 列表只读缩略图，成片仍用原图。老的素材没有缩略图时由路由回落到原图。
+// ------------------------------------------------------------
+
+export function thumbPath(id: string) {
+  return path.join(MEDIA_DIR, `${safeId(id)}-thumb.jpg`);
+}
+
+export async function readMediaThumb(id: string): Promise<Buffer | null> {
+  try {
+    return await fs.readFile(thumbPath(id));
+  } catch {
+    return null;
+  }
+}
+
+// ------------------------------------------------------------
+// 背景音乐（每行程一段：data/bgm/<tripId>.<ext> + <tripId>.json）
+// ------------------------------------------------------------
+
+export const BGM_DIR = path.join(DATA_DIR, "bgm");
+
+export const isTripId = (value: string): boolean => /^[\w-]{1,64}$/.test(value);
+
+const safeTripId = (id: string) => {
+  if (!isTripId(id)) throw new Error(`非法行程 id: ${id}`);
+  return id;
+};
+
+export interface BgmSidecar {
+  name: string;
+  ext: string;
+  contentType: string;
+  size: number;
+  createdAt: number;
+}
+
+function bgmSidecarPath(tripId: string) {
+  return path.join(BGM_DIR, `${safeTripId(tripId)}.json`);
+}
+
+/** 写入背景音乐；同一行程换文件时清掉旧扩展名的残留 */
+export async function writeBgm(
+  tripId: string,
+  buf: Buffer,
+  meta: BgmSidecar
+): Promise<void> {
+  await ensureDirs();
+  await fs.mkdir(BGM_DIR, { recursive: true });
+  const id = safeTripId(tripId);
+  const keep = `${id}.${meta.ext}`;
+  const entries = await fs.readdir(BGM_DIR).catch(() => [] as string[]);
+  await Promise.all(
+    entries
+      .filter((f) => f.startsWith(`${id}.`) && f !== keep && !f.endsWith(".json"))
+      .map((f) => fs.unlink(path.join(BGM_DIR, f)).catch(() => {}))
+  );
+  await writeFileAtomic(path.join(BGM_DIR, keep), buf);
+  await writeFileAtomic(bgmSidecarPath(id), JSON.stringify(meta));
+}
+
+/** 查该行程的背景音乐（元数据优先，元数据丢了就按文件名兜底） */
+export async function findBgm(
+  tripId: string
+): Promise<{ path: string; meta: BgmSidecar } | null> {
+  if (!isTripId(tripId)) return null;
+  const prefix = `${tripId}.`;
+  const entries = await fs.readdir(BGM_DIR).catch(() => [] as string[]);
+  const audio = entries.filter((f) => f.startsWith(prefix) && !f.endsWith(".json")).sort();
+  if (!audio.length) return null;
+  const file = audio[0];
+  let meta: BgmSidecar = {
+    name: file.slice(prefix.length),
+    ext: path.extname(file).slice(1),
+    contentType: "audio/mpeg",
+    size: 0,
+    createdAt: 0,
+  };
+  try {
+    meta = { ...meta, ...JSON.parse(await fs.readFile(bgmSidecarPath(tripId), "utf-8")) };
+  } catch {
+    // 元数据丢了也能混流
+  }
+  return { path: path.join(BGM_DIR, file), meta };
+}
+
+export async function readBgm(
+  tripId: string
+): Promise<{ buf: Buffer; meta: BgmSidecar } | null> {
+  const found = await findBgm(tripId);
+  if (!found) return null;
+  try {
+    return { buf: await fs.readFile(found.path), meta: found.meta };
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteBgm(tripId: string): Promise<void> {
+  const found = await findBgm(tripId);
+  if (found) await fs.unlink(found.path).catch(() => {});
+  await fs.unlink(bgmSidecarPath(tripId)).catch(() => {});
+}
+
+// ------------------------------------------------------------
+// 成片（纪录片）清单
+//
+// 每部片子配一份同名 .json 边车（记录 tripId/时长/是否混了音乐），
+// 这样「成片库」不必解析文件名就能按行程归档——老的片子没有边车，
+// 由 listRecordings 用行程名匹配文件名兜底。
+// ------------------------------------------------------------
+
+export interface RecordingSidecar {
+  tripId?: string;
+  tripName?: string;
+  fps?: number;
+  width?: number;
+  height?: number;
+  /** 秒 */
+  duration?: number;
+  bgm?: boolean;
+  /** 该片的源帧数（逐帧渲染路径记录） */
+  frames?: number;
+  createdAt?: number;
+}
+
+export const isRecordingFile = (name: string): boolean =>
+  !name.startsWith(".") && /\.(mp4|webm)$/i.test(name);
+
+function recordingSidecarPath(file: string) {
+  const base = path.basename(file).replace(/\.(mp4|webm)$/i, "");
+  return path.join(RECORDINGS_DIR, `${base}.json`);
+}
+
+export async function writeRecordingSidecar(
+  file: string,
+  meta: RecordingSidecar
+): Promise<void> {
+  await writeFileAtomic(recordingSidecarPath(file), JSON.stringify(meta));
+}
+
+export async function readRecordingSidecar(file: string): Promise<RecordingSidecar> {
+  try {
+    return JSON.parse(await fs.readFile(recordingSidecarPath(file), "utf-8"));
+  } catch {
+    return {};
+  }
+}
+
+export async function deleteRecording(file: string): Promise<boolean> {
+  const name = path.basename(file);
+  if (name !== file || !isRecordingFile(name)) return false;
+  let existed = true;
+  await fs.unlink(path.join(RECORDINGS_DIR, name)).catch(() => {
+    existed = false;
+  });
+  await fs.unlink(recordingSidecarPath(name)).catch(() => {});
+  return existed;
+}
+
+export interface RecordingEntry extends RecordingSidecar {
+  file: string;
+  url: string;
+  size: number;
+  mtime: number;
+}
+
+export async function listRecordings(
+  filter?: { tripId?: string; tripName?: string }
+): Promise<RecordingEntry[]> {
+  await ensureDirs();
+  const dirents = await fs.readdir(RECORDINGS_DIR, { withFileTypes: true }).catch(() => []);
+  const out: RecordingEntry[] = [];
+  for (const dirent of dirents) {
+    if (!dirent.isFile() || !isRecordingFile(dirent.name)) continue;
+    const stat = await fs.stat(path.join(RECORDINGS_DIR, dirent.name)).catch(() => null);
+    if (!stat) continue;
+    const meta = await readRecordingSidecar(dirent.name);
+    out.push({
+      ...meta,
+      file: dirent.name,
+      url: `/api/recordings/${encodeURIComponent(dirent.name)}`,
+      size: stat.size,
+      mtime: stat.mtimeMs,
+    });
+  }
+  out.sort((a, b) => b.mtime - a.mtime);
+  if (!filter?.tripId) return out;
+  // 没边车的老片子按文件名里的行程名兜底
+  const needle = filter.tripName
+    ? filter.tripName.replace(/[\\/:*?"<>|\s]+/g, "-").slice(0, 40)
+    : "";
+  return out.filter(
+    (e) => e.tripId === filter.tripId || (!e.tripId && needle && e.file.includes(needle))
+  );
 }

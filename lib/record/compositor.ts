@@ -206,7 +206,11 @@ export function createCompositor({
       video.src = url;
       video.muted = true;
       video.playsInline = true;
-      video.preload = "auto";
+      // 只取元数据：合成器需要的是「时长」和「按时间点取帧」。
+      // 用 preload="auto" 的话，8 个上百 MB 的视频会在进录制页的瞬间
+      // 被浏览器一起下载（实测素材大时录制页长时间卡在「预热中」），
+      // 而真正要用的帧在渲染时按 Range 请求拉，一次只需一小段。
+      video.preload = "metadata";
       await new Promise<void>((r) => {
         video.onloadedmetadata = () => r();
         video.onerror = () => r();

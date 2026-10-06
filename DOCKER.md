@@ -27,6 +27,20 @@ docker compose up -d --build
 | `lib/record/offline.ts` | 渲染会话 id 生成改用 `uid()` |
 | `app/api/recordings/frames/route.ts` | 合成超时 280s→20min；补 `-color_range tv` |
 | `app/api/recordings/route.ts` | webm→mp4 转码超时 240s→10min |
+| `lib/server/mediaTools.ts` | 新增。HEIC 转 JPEG、缩略图、时长探测、背景音乐混流 |
+| `app/api/bgm/route.ts` | 新增。背景音乐上传/试听/删除（GET/POST/DELETE） |
+| `components/FilmLibrary.tsx` | 新增。成片库（列表/播放/下载/删除） |
+| `app/api/media/route.ts` | 上传时 HEIC→JPEG、生成 1280px 缩略图 |
+| `app/api/media/[id]/route.ts` | 新增 `?thumb=1` 读缩略图 |
+| `app/api/recordings/route.ts` | 新增 GET 成片清单、DELETE 删除；POST 支持 `tripId` 并混入背景音乐 |
+| `lib/server/db.ts` | 新增缩略图/背景音乐/成片清单的存储函数与边车元数据 |
+| `lib/media.ts` | 新增 `mediaThumbUrl` / `bgmUrl` / 背景音乐读写 |
+| `components/StopMedia.tsx` | 列表改读缩略图；文件选择器显式接受 `.heic/.heif` |
+| `components/PlanTimeline.tsx` | **跨天路段也能改交通方式**（原来这里是个缺口） |
+| `lib/record/compositor.ts` | 视频预载 `auto` → `metadata`（素材大时录制页不再长时间卡在「预热中」） |
+| `app/trip/[id]/record/page.tsx` | 录制页新增「背景音乐」选择（上传/试听/更换/移除） |
+| `Dockerfile` | 运行阶段加 `libheif-examples`（heif-convert） |
+| `app/globals.css` | 成片库、跨天路段标签、背景音乐行的样式 |
 
 ## 四、非容器相关的代码级修复（本版新增，均已实测）
 
@@ -56,13 +70,71 @@ JPEG 帧是全范围（full range），ffmpeg 新版本里 `-pix_fmt yuv420p` �
 修复后: pix_fmt=yuv420p   color_range=tv
 ```
 
+## 五、v2 新增的五个功能（均已实测）
+
+**1. HEIC / HEIF 自动转 JPEG（iPhone 照片）**
+iPhone 默认拍 HEIC。浏览器解不了、镜像里的静态 ffmpeg 也没带 libheif —— 结果是照片
+「上传成功」但缩略图空白、**成片里被静默丢弃**（合成器 `img.decode()` 或 ffmpeg 读失败就跳过）。
+现在上传时按文件头识别 HEIF 家族（含 AVIF），用 `heif-convert` 转成 JPEG 再入库，
+显示名同步改成 `.jpg`。转不了就按原文件入库，绝不丢文件。
+Dockerfile 因此增加 `libheif-examples`（`heif-convert`，apt 约 2.5 分钟，只拉 libheif1/libde265/libx265）。
+
+**2. 素材缩略图（长边 1280）**
+原来规划页列表直接 `<img src=原图>`，手机 4000×3000 的照片一多就卡。
+现在上传时由 ffmpeg 生成 `<id>-thumb.jpg`（视频取第 1 秒的帧当封面），
+列表只读 `GET /api/media/<id>?thumb=1`；老素材没有缩略图时路由回落到原图，
+前端 `onError` 也兜一层。成片仍用原图，画质不受影响。
+
+**3. 成片库**
+原来「/api/recordings」只有 POST，没有列表接口，出片后关掉页面就只剩文件系统里翻。
+现在有 `GET /api/recordings?tripId=<id>`（列成片）、`DELETE ?file=<名>`（删），
+行程页左栏底部多一个「成片库」：时长 / fps / 大小 / 是否配乐 / 时间 + 播放 / 下载 / 删除。
+每部片子落一份同名 `.json` 边车（tripId、时长、帧数、是否混音），
+按行程归档不靠解析文件名；老片子没有边车时用文件名里的行程名兜底。
+
+**4. 跨天路段可改交通方式**
+`normalizeTrip()` 会在所有相邻地点之间建段（跨天也算），但时间线只在「同一天内还有下一站」
+时渲染交通选择器 —— 每天最后一站到次日第一站那段看不到也改不了。
+现在只要该站后面还有站就渲染选择器，并加「跨天 · 次日首站『xxx』」标签。
+
+**5. 成片背景音乐**
+原来成片全程无声（合成器把视频静音，且没有任何音频轨）。
+现在录制页有「背景音乐」：上传一首 mp3/m4a/wav/aac/flac/ogg，可试听、更换、移除；
+合成时服务端把它混进 MP4：
+- 视频流 `-c:v copy`，不重编码（J1900 上只花几秒）；
+- 音乐比片子短就 `-stream_loop -1` 循环，`-shortest` 以画面长度为准；
+- 首尾各做 1.5s / 2s 淡入淡出（淡出起点按 ffprobe 探到的时长算）；
+- 混完先整体校验码流，通过才替换原片；**任何一步失败都保留无声版本**。
+
+存放位置：`data/bgm/<行程id>.<扩展名>`（同一行程只保留一份）。
+上限由 `MAX_BGM_UPLOAD_MB` 控制，默认 30MB。
+
+**6. 录制页的大素材卡顿（连带修掉）**
+`lib/record/compositor.ts` 的 `prepare()` 在打开录制页时会预载**全部**素材：
+视频用 `preload="auto"`，浏览器会把每个视频都开始下载（实测素材里 8 个视频合计 600MB+），
+素材一多页面就长时间停在「预热中」。改为 `preload="metadata"`：只要时长信息，
+真正要用的帧在渲染时按 Range 请求拉（服务端 `/api/media/<id>` 支持 206），一次只取一小段。
+
+> **遗留（未改，属设计层面）**：图片仍是整张 `img.decode()`，4096×3072 的原图解码后
+> 约 50MB 位图，几十张就是 GB 级内存。后续可以改 `createImageBitmap(img, { resizeWidth })`
+> 预缩到输出画幅量级再绘制。普通家用机跑得动，低配客户端要留意。
+
+**存量素材补缩略图**
+v2 之前的素材没有缩略图（列表会回落拉原图）。补生成：
+
+```bash
+cp scripts/backfill-thumbnails.sh data/
+docker exec travel-story sh /app/data/backfill-thumbnails.sh
+```
+
+幂等，可反复跑。注意：回落响应只缓存 60 秒，补完刷新页面即可看到小图。
+
 ## 已知限制（上游设计如此，非 bug）
 
-- **跨天路段没有编辑入口**：`normalizeTrip()` 会在**所有相邻地点之间**（跨天也算）自动建段，
-  地图和成片里都生效，默认交通方式为「汽车」；但时间线 UI 只在「同一天内还有下一个节点」时
-  渲染交通方式选择器，所以每天最后一个地点到次日第一个地点那段**看不到也改不了**。
 - **「播放行程」不显示照片/视频**：它只播地图镜头与路线动画；素材仅参与「生成纪录片」。
 - 无鉴权（见下）。
+
+> 上一版列在这里的「跨天路段没有编辑入口」已在 v2 修掉（见上）。
 
 ## 三个踩过的坑（都在本机实测过）
 

@@ -25,6 +25,13 @@ FROM ${NODE_IMAGE} AS runtime
 COPY --from=mwader/static-ffmpeg:latest /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=mwader/static-ffmpeg:latest /ffprobe /usr/local/bin/ffprobe
 
+# heif-convert：iPhone 默认拍 HEIC，浏览器解不了、静态 ffmpeg 也没带 libheif。
+# 不带这条，HEIC 会「上传成功但缩略图空白、成片里被静默丢弃」。
+# --no-install-recommends 只拉 libheif1/libde265/libx265，实测 apt 约 2 分半（首次构建）。
+RUN apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends libheif-examples \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 # 用 COPY --chown 在写入时就设好属主（等价于 chown -R，但在 overlayfs 上不需要对每个文件做 copy-up，快得多）
 COPY --chown=981:901 --from=builder /app/.next/standalone ./

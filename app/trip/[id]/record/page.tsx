@@ -34,6 +34,7 @@ import {
   type OfflineRenderResult,
   type RenderPhase,
 } from "@/lib/record/offline";
+import { bgmUrl, deleteBgm, fetchBgmInfo, putBgm } from "@/lib/media";
 import type { TravelMapEngine } from "@/lib/map/engine";
 
 type Phase = "preparing" | "ready" | "rendering" | "done" | "error";
@@ -86,6 +87,19 @@ export default function RecordPage() {
   const [fps, setFps] = useState<VideoFps>(60);
   /** 渲染监视器：输出画布挂进 DOM，每一帧所见即所得 */
   const monitorRef = useRef<HTMLDivElement>(null);
+
+  /** 背景音乐：该行程已配的音频；合成时由服务端 ffmpeg 混进成片 */
+  const [bgmInfo, setBgmInfo] = useState<{ exists: boolean; name?: string } | null>(null);
+  const [bgmBusy, setBgmBusy] = useState(false);
+  const [bgmPlaying, setBgmPlaying] = useState(false);
+  const bgmInputRef = useRef<HTMLInputElement>(null);
+  const bgmAudioRef = useRef<HTMLAudioElement>(null);
+
+  const tripId = trip?.id;
+  useEffect(() => {
+    if (!tripId) return;
+    fetchBgmInfo(tripId).then(setBgmInfo);
+  }, [tripId]);
 
   const totalStops = trip?.stops.length ?? 0;
   const mediaCount =
@@ -215,6 +229,50 @@ export default function RecordPage() {
     router.push(`/trip/${trip!.id}`);
   }
 
+  // ----------------------------------------------------------
+  // 背景音乐（存服务端，合成成片时由 ffmpeg 混流；不写进行程数据）
+  // ----------------------------------------------------------
+
+  async function handleBgmPick(file: File) {
+    if (!tripId) return;
+    setBgmBusy(true);
+    try {
+      await putBgm(tripId, file);
+      setBgmInfo(await fetchBgmInfo(tripId));
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBgmBusy(false);
+    }
+  }
+
+  async function handleBgmRemove() {
+    if (!tripId) return;
+    if (!confirm("移除这段背景音乐？")) return;
+    setBgmBusy(true);
+    try {
+      await deleteBgm(tripId);
+      setBgmInfo({ exists: false });
+      setBgmPlaying(false);
+    } finally {
+      setBgmBusy(false);
+    }
+  }
+
+  function toggleBgmPlay() {
+    const el = bgmAudioRef.current;
+    if (!el) return;
+    if (el.paused) {
+      el.currentTime = 0;
+      el.play()
+        .then(() => setBgmPlaying(true))
+        .catch(() => setBgmPlaying(false));
+    } else {
+      el.pause();
+      setBgmPlaying(false);
+    }
+  }
+
   const progress =
     totalFrames > 0 ? Math.min(100, Math.round((rendered / totalFrames) * 100)) : 0;
   const spec = videoSpec(format, quality);
@@ -341,6 +399,38 @@ export default function RecordPage() {
               ))}
             </div>
           </div>
+          <div className="rec-opt" role="group" aria-label="背景音乐">
+            <span className="rec-opt-label font-mono">背景音乐</span>
+            <div className="rec-formats rec-bgm">
+              {bgmInfo?.exists ? (
+                <>
+                  <button className="on" onClick={toggleBgmPlay} title="试听 / 暂停">
+                    {bgmPlaying ? "⏸ 暂停" : "♪ 试听"}
+                    <span className="rec-format-sub font-mono">{bgmInfo.name}</span>
+                  </button>
+                  <button
+                    disabled={bgmBusy}
+                    onClick={() => bgmInputRef.current?.click()}
+                    title="换一段音乐"
+                  >
+                    更换
+                  </button>
+                  <button disabled={bgmBusy} onClick={handleBgmRemove} title="移除背景音乐">
+                    移除
+                  </button>
+                </>
+              ) : (
+                <button
+                  disabled={bgmBusy}
+                  onClick={() => bgmInputRef.current?.click()}
+                  title="上传一首音乐，合成时自动配上"
+                >
+                  {bgmBusy ? "上传中…" : "＋ 选择音频"}
+                  <span className="rec-format-sub font-mono">短于片子会自动循环</span>
+                </button>
+              )}
+            </div>
+          </div>
           <button className="btn" onClick={startRender}>
             ● 开始录制
           </button>
@@ -387,6 +477,27 @@ export default function RecordPage() {
             </button>
           </div>
         </div>
+      )}
+
+      {/* 背景音乐：隐藏的选文件入口 + 试听用的 <audio>（不会出现在视频里） */}
+      <input
+        ref={bgmInputRef}
+        type="file"
+        accept="audio/*,.mp3,.m4a,.wav,.aac,.flac,.ogg,.opus"
+        hidden
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) handleBgmPick(f);
+          e.target.value = "";
+        }}
+      />
+      {tripId && (
+        <audio
+          ref={bgmAudioRef}
+          src={bgmUrl(tripId)}
+          preload="none"
+          onEnded={() => setBgmPlaying(false)}
+        />
       )}
     </main>
   );

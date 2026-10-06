@@ -49,6 +49,8 @@ export interface OfflineRenderResult {
   file: string;
   url: string;
   size: number;
+  /** 服务端是否成功混入背景音乐 */
+  bgm?: boolean;
 }
 
 export type RenderPhase = "prewarm" | "render" | "encode";
@@ -120,8 +122,8 @@ export function renderOffline({
       usedWebCodecs = Boolean(encConfig);
       session = uid();
       const sink: FrameSink = encConfig
-        ? createWebCodecsSink(encConfig, width, height, fps, trip.name)
-        : createJpegSink(session, trip.name, fps);
+        ? createWebCodecsSink(encConfig, width, height, fps, trip.name, trip.id)
+        : createJpegSink(session, trip.name, fps, trip.id);
       console.log(
         "[travel-story] 渲染通道:",
         encConfig
@@ -311,7 +313,8 @@ function createWebCodecsSink(
   width: number,
   height: number,
   fps: number,
-  tripName: string
+  tripName: string,
+  tripId: string
 ): FrameSink {
   const muxer = new Muxer({
     target: new ArrayBufferTarget(),
@@ -351,7 +354,7 @@ function createWebCodecsSink(
       if (encoderError) throw encoderError;
       muxer.finalize();
       const res = await fetch(
-        `/api/recordings?trip=${encodeURIComponent(tripName)}&ext=mp4`,
+        `/api/recordings?trip=${encodeURIComponent(tripName)}&tripId=${encodeURIComponent(tripId)}&ext=mp4`,
         {
           method: "POST",
           headers: { "Content-Type": "video/mp4" },
@@ -376,7 +379,7 @@ function createWebCodecsSink(
 // 通道 A+B：JPEG 帧序列（兜底；编码与上传全部后台并行）
 // ------------------------------------------------------------
 
-function createJpegSink(session: string, tripName: string, fps: number): FrameSink {
+function createJpegSink(session: string, tripName: string, fps: number, tripId: string): FrameSink {
   /** 每批上传的帧数（约 1 秒视频） */
   const BATCH = fps;
   let batch: { idx: number; blob: Blob }[] = [];
@@ -449,7 +452,7 @@ function createJpegSink(session: string, tripName: string, fps: number): FrameSi
         if (s.status === "rejected") throw s.reason;
       }
       const res = await fetch(
-        `/api/recordings/frames?session=${session}&finalize=1&trip=${encodeURIComponent(tripName)}&fps=${fps}`,
+        `/api/recordings/frames?session=${session}&finalize=1&trip=${encodeURIComponent(tripName)}&tripId=${encodeURIComponent(tripId)}&fps=${fps}`,
         { method: "POST" }
       );
       const json = await res.json();

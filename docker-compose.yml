@@ -15,6 +15,7 @@ services:
       MAX_RECORDING_UPLOAD_MB: 512
       MAX_FRAME_BATCH_MB: 64
       MAX_TRIPS_BODY_MB: 10
+      MAX_BGM_UPLOAD_MB: 30
       TZ: Asia/Shanghai
     user: "981:901"
     volumes:

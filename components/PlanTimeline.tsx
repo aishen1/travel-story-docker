@@ -92,6 +92,7 @@ export function PlanTimeline({
             <ol className="stop-list">
               {stops.map((stop, i) => {
                 const seg = segByFrom.get(stop.id);
+                const nextStop = seg ? trip.stops.find((s) => s.id === seg.toStopId) : undefined;
                 const spec = landmark.match(stop.name, stop.type);
                 const isLast = i === stops.length - 1 && day === trip.days[trip.days.length - 1];
                 return (
@@ -134,16 +135,23 @@ export function PlanTimeline({
                       onRemove={(mediaId) => onRemoveMedia?.(stop.id, mediaId)}
                     />
 
-                    {/* 交通方式只在「同一天内还有下一个节点」时显示；
-                        每天的最后一个节点不翻篇到明天，后面没有了就不显示 */}
-                    {seg && i < stops.length - 1 && (
-                      <div className="segment">
+                    {/* 交通方式：只要有下一站就显示（含跨天的那一段）。
+                        seg 只在「全局后面还有站」时存在，所以最后一天的最后一站没有；
+                        每天最后一站的 seg 指向次日首站——以前这里被 i < stops.length-1
+                        挡掉了，导致跨天段默认「汽车」且无法修改。 */}
+                    {seg && (
+                      <div className={`segment${i === stops.length - 1 ? " segment-cross" : ""}`}>
                         <div className="segment-line" />
                         <TransportPicker
                           value={seg.transport}
                           onChange={(t) => onSetTransport(stop.id, t)}
                         />
                         <div className="segment-line" />
+                        {i === stops.length - 1 && (
+                          <span className="segment-cross-tag font-mono">
+                            跨天 · 次日首站{nextStop ? `「${nextStop.name}」` : ""}
+                          </span>
+                        )}
                       </div>
                     )}
                     {isLast && null}

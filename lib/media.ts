@@ -12,6 +12,50 @@ export function mediaUrl(id: string): string {
   return `/api/media/${encodeURIComponent(id)}`;
 }
 
+/** 缩略图直链（长边 1280）：列表/规划页用，别拉原图。没有缩略图时服务端回落原图 */
+export function mediaThumbUrl(id: string): string {
+  return `/api/media/${encodeURIComponent(id)}?thumb=1`;
+}
+
+/** 该行程的背景音乐直链（没有则 404） */
+export function bgmUrl(tripId: string): string {
+  return `/api/bgm?tripId=${encodeURIComponent(tripId)}`;
+}
+
+/** 背景音乐信息（是否存在/文件名/大小） */
+export async function fetchBgmInfo(
+  tripId: string
+): Promise<{ exists: boolean; name?: string; size?: number }> {
+  try {
+    const res = await fetch(`/api/bgm?tripId=${encodeURIComponent(tripId)}&info=1`);
+    if (!res.ok) return { exists: false };
+    return await res.json();
+  } catch {
+    return { exists: false };
+  }
+}
+
+/** 上传/替换背景音乐 */
+export async function putBgm(tripId: string, file: File): Promise<void> {
+  const res = await fetch(`/api/bgm?tripId=${encodeURIComponent(tripId)}`, {
+    method: "POST",
+    headers: { "Content-Type": file.type || "application/octet-stream" },
+    body: file,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error ?? `背景音乐上传失败（${res.status}）`);
+  }
+}
+
+export async function deleteBgm(tripId: string): Promise<void> {
+  try {
+    await fetch(`/api/bgm?tripId=${encodeURIComponent(tripId)}`, { method: "DELETE" });
+  } catch (e) {
+    console.warn("[travel-story] 删除背景音乐失败", e);
+  }
+}
+
 export async function putMediaBlob(id: string, file: File): Promise<void> {
   const res = await fetch(
     `/api/media?id=${encodeURIComponent(id)}&name=${encodeURIComponent(file.name)}`,

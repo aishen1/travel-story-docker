@@ -21,6 +21,7 @@ import type { SearchResult, Transport } from "@/lib/types";
 import { routing } from "@/lib/routing";
 import { TravelMap } from "@/components/TravelMap";
 import { PlanTimeline } from "@/components/PlanTimeline";
+import { FilmLibrary } from "@/components/FilmLibrary";
 import type { TravelMapEngine } from "@/lib/map/engine";
 
 export default function TripPage() {
@@ -186,6 +187,8 @@ export default function TripPage() {
             onAddMedia={handleAddMedia}
             onRemoveMedia={handleRemoveMedia}
           />
+          {/* 成片库：本行程已生成的纪录片（列表/播放/下载/删除） */}
+          <FilmLibrary tripId={trip.id} tripName={trip.name} />
         </aside>
 
         <section className="plan-map">

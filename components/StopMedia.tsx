@@ -13,7 +13,7 @@
 // ============================================================
 
 import { useRef } from "react";
-import { mediaUrl } from "@/lib/media";
+import { mediaThumbUrl, mediaUrl } from "@/lib/media";
 import type { MediaMeta, TripStop } from "@/lib/types";
 
 export function StopMedia({
@@ -43,7 +43,8 @@ export function StopMedia({
       <input
         ref={inputRef}
         type="file"
-        accept="image/*,video/*"
+        // .heic/.heif 显式列出：Windows 不认这个扩展名的 MIME，只写 image/* 会选不中 iPhone 照片
+        accept="image/*,video/*,.heic,.heif,.avif"
         multiple
         hidden
         onChange={(e) => {
@@ -57,8 +58,14 @@ export function StopMedia({
   );
 }
 
+/**
+ * 缩略图：只读服务端生成的 1280px 小图，不拉原图（手机照片动辄 10MB）。
+ *  - 图片：<img> 直接读 thumb；没有 thumb（老素材）时 onError 回落到原图；
+ *  - 视频：<video preload="none" poster=thumb>，不加载视频本体，只显示封面帧。
+ */
 function MediaThumb({ meta, onRemove }: { meta: MediaMeta; onRemove?: () => void }) {
   const url = mediaUrl(meta.id);
+  const thumb = mediaThumbUrl(meta.id);
 
   return (
     <div
@@ -68,9 +75,19 @@ function MediaThumb({ meta, onRemove }: { meta: MediaMeta; onRemove?: () => void
     >
       {meta.kind === "image" ? (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={url} alt={meta.name} />
+        <img
+          src={thumb}
+          alt={meta.name}
+          loading="lazy"
+          onError={(e) => {
+            const el = e.currentTarget;
+            if (el.dataset.fallback) return;
+            el.dataset.fallback = "1";
+            el.src = url;
+          }}
+        />
       ) : (
-        <video src={url} muted preload="metadata" />
+        <video src={url} muted preload="none" poster={thumb} />
       )}
       {meta.kind === "video" && <span className="stop-media-play">▶</span>}
       {onRemove && (

@@ -112,6 +112,9 @@ npm run dev                     # 打开 http://localhost:3000
 
 > 用 Docker 部署见 [DOCKER.md](./DOCKER.md)。注意：从源码构建实际需要 **Node.js 22.5+**
 > （`app/api/tiles/[...path]/route.ts` 依赖内置模块 `node:sqlite`），下面的「Node.js 20+」仅适用于不构建的规划/预览场景。
+>
+> **Docker 版相对本上游源码额外包含**：HEIC/HEIF 照片自动转 JPEG、素材缩略图、
+> 成片库（列表/下载/删除）、跨天路段的交通方式编辑、成片背景音乐。详见 DOCKER.md。
 
 | 环境变量 | 用途 | 默认值 |
 | --- | --- | --- |
@@ -121,6 +124,7 @@ npm run dev                     # 打开 http://localhost:3000
 | `MAX_RECORDING_UPLOAD_MB` | 单个完整录像上传上限 | 512 MB |
 | `MAX_FRAME_BATCH_MB` | 单批 JPEG 帧上传上限 | 64 MB |
 | `MAX_TRIPS_BODY_MB` | 行程 JSON 写入上限 | 10 MB |
+| `MAX_BGM_UPLOAD_MB` | 单个行程背景音乐上传上限 | 30 MB |
 
 > 密钥只写进 `.env.local`，不要给服务端密钥加 `NEXT_PUBLIC_` 前缀。
 

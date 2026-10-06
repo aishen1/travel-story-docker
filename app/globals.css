@@ -1886,3 +1886,116 @@ body::before {
   font-weight: 400;
   color: rgba(246, 241, 228, 0.6);
 }
+
+/* ============================================================
+   跨天路段（每天最后一站 → 次日首站）
+   以前这一段不渲染交通选择器，跨天段只能默认「汽车」且改不了。
+   面板在深色录制页之外，用页面配色；标题行独占一行居中。
+   ============================================================ */
+.segment-cross {
+  flex-wrap: wrap;
+}
+.segment-cross-tag {
+  flex-basis: 100%;
+  text-align: center;
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+/* ============================================================
+   成片库（规划页左栏底部）：本行程已生成的纪录片
+   ============================================================ */
+.film-lib {
+  padding: 18px 22px 44px;
+  border-top: 1px solid var(--line);
+}
+.film-lib-head {
+  margin-bottom: 10px;
+}
+.film-lib-kicker {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  color: var(--muted);
+}
+.film-lib-head h2 {
+  margin: 3px 0 0;
+  font-size: 16px;
+}
+.film-lib-empty {
+  font-size: 12.5px;
+  line-height: 1.65;
+  margin: 0;
+}
+.film-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  background: #fffdf7;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.film-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.film-row-name {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.film-row-meta {
+  font-size: 10.5px;
+}
+.film-row-actions {
+  display: flex;
+  gap: 4px;
+}
+.film-act {
+  width: 27px;
+  height: 27px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1;
+  text-decoration: none;
+  cursor: pointer;
+}
+.film-act:hover {
+  border-color: var(--ink);
+}
+.film-del:hover {
+  color: #b3261e;
+  border-color: #b3261e;
+}
+.film-act:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 录制页的「背景音乐」行：按钮里的文件名要截断，不能撑破卡片 */
+.rec-bgm {
+  flex-wrap: wrap;
+}
+.rec-bgm button {
+  max-width: 260px;
+}
+.rec-bgm button > span {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
