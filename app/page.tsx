@@ -6,6 +6,7 @@ import { useTrips } from "@/lib/useStore";
 import { deleteTrip, formatDateCN, tripDays, updateTrip, whenSynced } from "@/lib/store";
 import { seedIfEmpty } from "@/lib/seed";
 import { CreateTripModal } from "@/components/CreateTripModal";
+import { importTripZip } from "@/lib/media";
 import { LandmarkGlyph } from "@/components/LandmarkMarker";
 import { GlobeMap, type GlobeHandle, type GlobeMarker } from "@/components/GlobeMap";
 import { DoorIcon, FootstepsIcon, PenPaperIcon } from "@/components/ActionIcons";
@@ -15,6 +16,9 @@ export default function HomePage() {
   const [showCreate, setShowCreate] = useState(false);
   /** 足迹模式：hero 内容淡出、地球滑到左边、右侧出统计面板 */
   const [footprints, setFootprints] = useState(false);
+  /** 导入行程（zip）进行中 */
+  const [importing, setImporting] = useState(false);
+  const importRef = useRef<HTMLInputElement>(null);
   const globeRef = useRef<GlobeHandle>(null);
   const tripsSectionRef = useRef<HTMLDivElement>(null);
 
@@ -185,6 +189,39 @@ export default function HomePage() {
                 <FootstepsIcon />
                 我的足迹
               </button>
+              <button
+                className="btn btn-ghost"
+                disabled={importing}
+                onClick={() => importRef.current?.click()}
+                title="导入之前导出的行程 zip（含素材与背景音乐）"
+              >
+                {importing ? "导入中…" : "⬆ 导入行程"}
+              </button>
+              <input
+                ref={importRef}
+                type="file"
+                accept=".zip,application/zip"
+                hidden
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = "";
+                  if (!file) return;
+                  setImporting(true);
+                  try {
+                    const r = await importTripZip(file);
+                    alert(
+                      `已导入「${r.name}」：素材 ${r.media} 份` +
+                        (r.bgm ? "，含背景音乐" : "") +
+                        (r.renamed ? "（与原行程 id 冲突，已另存为新行程）" : "")
+                    );
+                    window.location.reload();
+                  } catch (err) {
+                    alert(err instanceof Error ? err.message : String(err));
+                  } finally {
+                    setImporting(false);
+                  }
+                }}
+              />
             </div>
           </section>
         </div>

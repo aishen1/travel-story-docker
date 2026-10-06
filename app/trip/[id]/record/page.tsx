@@ -35,6 +35,11 @@ import {
   type RenderPhase,
 } from "@/lib/record/offline";
 import { bgmUrl, deleteBgm, fetchBgmInfo, putBgm } from "@/lib/media";
+import {
+  clearRenderJobs,
+  fetchRenderJobs,
+  type RenderJob,
+} from "@/lib/renderJobs";
 import type { TravelMapEngine } from "@/lib/map/engine";
 
 type Phase = "preparing" | "ready" | "rendering" | "done" | "error";
@@ -95,10 +100,21 @@ export default function RecordPage() {
   const bgmInputRef = useRef<HTMLInputElement>(null);
   const bgmAudioRef = useRef<HTMLAudioElement>(null);
 
+  /** 素材加载进度（图片/视频逐份预载） */
+  const [prepare, setPrepare] = useState({ done: 0, total: 0 });
+  /** 上次渲染任务：中断可见（帧在浏览器里，刷新无法续渲，但要让人知道） */
+  const [lastJob, setLastJob] = useState<RenderJob | null>(null);
+  const [jobStale, setJobStale] = useState(false);
+  const [jobBusy, setJobBusy] = useState(false);
+
   const tripId = trip?.id;
   useEffect(() => {
     if (!tripId) return;
     fetchBgmInfo(tripId).then(setBgmInfo);
+    fetchRenderJobs(tripId).then(({ latest, stale }) => {
+      setLastJob(latest);
+      setJobStale(stale);
+    });
   }, [tripId]);
 
   const totalStops = trip?.stops.length ?? 0;
@@ -129,9 +145,14 @@ export default function RecordPage() {
       format,
       quality,
       fps,
+      // 素材多时别只转圈：告诉用户正在加载第几份
+      onPrepareProgress: (done, total) => {
+        if (!stale) setPrepare({ done, total });
+      },
     });
     compRef.current = comp;
     let stale = false; // 切规格重建时，旧合成器的 ready 不得把状态抢回 ready
+    setPrepare({ done: 0, total: mediaCount });
     comp.ready
       .then(() => {
         if (!stale) setPhase((p) => (p === "preparing" ? "ready" : p));
@@ -204,6 +225,8 @@ export default function RecordPage() {
       width: comp.canvas.width,
       height: comp.canvas.height,
       fps,
+      format,
+      quality,
       onProgress: (r, total, p) => {
         setRendered(r);
         setTotalFrames(total);
@@ -216,6 +239,9 @@ export default function RecordPage() {
         if (!res) return; // 用户取消（cancelRender 负责跳转）
         setResult(res);
         setPhase("done");
+        // 渲染任务已结束，清掉「上次中断」提示
+        setLastJob(null);
+        setJobStale(false);
       })
       .catch((e) => {
         console.error("[travel-story] 纪录片渲染失败", e);
@@ -227,6 +253,23 @@ export default function RecordPage() {
   function cancelRender() {
     recorderRef.current?.cancel();
     router.push(`/trip/${trip!.id}`);
+  }
+
+  // ----------------------------------------------------------
+  // 渲染任务记录（中断可见 / 残留帧可清）
+  // ----------------------------------------------------------
+
+  async function handleCleanupJobs() {
+    if (!tripId) return;
+    setJobBusy(true);
+    try {
+      const r = await clearRenderJobs(tripId);
+      setLastJob(null);
+      setJobStale(false);
+      alert(`已清除 ${r.removed} 条渲染记录，并清理残留帧目录 ${r.framesPurged} 个`);
+    } finally {
+      setJobBusy(false);
+    }
   }
 
   // ----------------------------------------------------------
@@ -347,6 +390,24 @@ export default function RecordPage() {
             逐帧离线渲染：先预热瓦片，再按固定时钟一帧一帧渲染合成，
             帧间隔严格相等、绝不掉帧。机器慢就慢点渲，成片帧数不变。
           </p>
+          {/* 上次渲染没跑完（关页面/断网/崩了）：说清楚，并给一键清理 */}
+          {lastJob && lastJob.status !== "done" && (
+            <div className="rec-lastjob">
+              <p>
+                上次渲染{jobStale || lastJob.status === "error" ? "中断了" : "未完成"}：
+                {new Date(lastJob.updatedAt).toLocaleString("zh-CN", { hour12: false })}
+                {lastJob.total > 0 && ` · ${lastJob.rendered}/${lastJob.total} 帧`}
+                {lastJob.error ? ` · ${lastJob.error}` : ""}
+              </p>
+              <p className="rec-lastjob-hint">
+                逐帧渲染的帧存在浏览器端，刷新无法从断点续渲 —— 重新点「开始录制」即可，
+                残留帧可以由下面这步清掉。
+              </p>
+              <button className="btn btn-ghost btn-sm" disabled={jobBusy} onClick={handleCleanupJobs}>
+                {jobBusy ? "清理中…" : "清理渲染记录与残留帧"}
+              </button>
+            </div>
+          )}
           <div className="rec-opt" role="group" aria-label="视频画幅">
             <span className="rec-opt-label font-mono">画幅</span>
             <div className="rec-formats">
@@ -441,7 +502,25 @@ export default function RecordPage() {
         <div className="rec-card">
           <p className="font-mono kicker">PREPARING</p>
           <h2 className="font-display">正在准备…</h2>
-          <p className="rec-card-info">加载字体与素材中（共 {mediaCount} 份）。</p>
+          {prepare.total > 0 ? (
+            <>
+              <p className="rec-card-info">
+                正在加载素材 {prepare.done} / {prepare.total}
+                {prepare.done < prepare.total ? "…" : "（完成）"}
+              </p>
+              <div className="rec-prep-bar">
+                <div
+                  className="rec-prep-fill"
+                  style={{ width: `${Math.round((prepare.done / Math.max(1, prepare.total)) * 100)}%` }}
+                />
+              </div>
+              <p className="rec-format-sub font-mono">
+                图片按输出画幅预缩后再入内存，几十张也不炸；素材越大这一步越久
+              </p>
+            </>
+          ) : (
+            <p className="rec-card-info">加载字体与地图资源中…</p>
+          )}
         </div>
       )}
 

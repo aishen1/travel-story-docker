@@ -125,6 +125,7 @@ npm run dev                     # 打开 http://localhost:3000
 | `MAX_FRAME_BATCH_MB` | 单批 JPEG 帧上传上限 | 64 MB |
 | `MAX_TRIPS_BODY_MB` | 行程 JSON 写入上限 | 10 MB |
 | `MAX_BGM_UPLOAD_MB` | 单个行程背景音乐上传上限 | 30 MB |
+| `MAX_IMPORT_MB` | 行程导入 zip 上传上限 | 2048 MB |
 
 > 密钥只写进 `.env.local`，不要给服务端密钥加 `NEXT_PUBLIC_` 前缀。
 

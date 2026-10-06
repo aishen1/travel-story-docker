@@ -4,8 +4,8 @@
 // Travel Story — 成片库（行程页左栏底部）
 //
 // 「生成纪录片」跑完一关页面，成片原来只能去服务器文件系统里翻。
-// 这里列出本行程已生成的片子：时长/大小/是否配了背景音乐，
-// 可直接在线播放、下载、删除。数据来自 GET /api/recordings。
+// 这里列出本行程已生成的片子：封面（首帧海报）/ 时长 / 大小 / 是否配乐，
+// 可页内直接播放、下载、删除。数据来自 GET /api/recordings。
 // ============================================================
 
 import { useCallback, useEffect, useState } from "react";
@@ -18,6 +18,8 @@ interface Film {
   duration?: number;
   fps?: number;
   bgm?: boolean;
+  clips?: number;
+  poster?: boolean;
   tripId?: string;
 }
 
@@ -38,6 +40,8 @@ function formatWhen(ms: number): string {
 export function FilmLibrary({ tripId, tripName }: { tripId: string; tripName: string }) {
   const [films, setFilms] = useState<Film[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  /** 正在页内播放的成片文件名 */
+  const [playing, setPlaying] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -64,6 +68,7 @@ export function FilmLibrary({ tripId, tripName }: { tripId: string; tripName: st
         method: "DELETE",
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (playing === file) setPlaying(null);
       await load();
     } catch (e) {
       alert(`删除失败：${e instanceof Error ? e.message : String(e)}`);
@@ -90,40 +95,70 @@ export function FilmLibrary({ tripId, tripName }: { tripId: string; tripName: st
       )}
 
       {films?.map((f) => (
-        <div className="film-row" key={f.file}>
-          <div className="film-row-main">
-            <span className="film-row-name" title={f.file}>
-              {f.file}
+        <div className="film-item" key={f.file}>
+          <div className="film-row">
+            {/* 封面：首帧海报；老片子没有海报时显示占位 */}
+            <span className="film-poster" title={f.file}>
+              {f.poster === false ? (
+                <span className="film-poster-none font-mono">无</span>
+              ) : (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={`${f.url}?poster=1`}
+                  alt={f.file}
+                  loading="lazy"
+                  onError={(e) => {
+                    const el = e.currentTarget;
+                    el.style.display = "none";
+                  }}
+                />
+              )}
             </span>
-            <span className="film-row-meta font-mono muted">
-              {formatDuration(f.duration)}
-              {f.fps ? ` · ${f.fps}fps` : ""}
-              {` · ${(f.size / 1024 / 1024).toFixed(1)}MB`}
-              {f.bgm ? " · ♪ 配乐" : ""}
-              {` · ${formatWhen(f.mtime)}`}
-            </span>
+            <div className="film-row-main">
+              <span className="film-row-name" title={f.file}>
+                {f.file}
+              </span>
+              <span className="film-row-meta font-mono muted">
+                {formatDuration(f.duration)}
+                {f.fps ? ` · ${f.fps}fps` : ""}
+                {` · ${(f.size / 1024 / 1024).toFixed(1)}MB`}
+                {f.bgm ? " · ♪ 配乐" : ""}
+                {f.clips ? ` · 🎤 原声×${f.clips}` : ""}
+                {` · ${formatWhen(f.mtime)}`}
+              </span>
+            </div>
+            <div className="film-row-actions">
+              <button
+                className={`film-act${playing === f.file ? " on" : ""}`}
+                title={playing === f.file ? "收起播放器" : "在页面里播放"}
+                onClick={() => setPlaying(playing === f.file ? null : f.file)}
+              >
+                {playing === f.file ? "■" : "▶"}
+              </button>
+              <a
+                className="film-act"
+                href={`${f.url}?download=1`}
+                title="下载"
+                download
+              >
+                ⬇
+              </a>
+              <button
+                className="film-act film-del"
+                title="删除"
+                disabled={busy === f.file}
+                onClick={() => handleDelete(f.file)}
+              >
+                {busy === f.file ? "…" : "✕"}
+              </button>
+            </div>
           </div>
-          <div className="film-row-actions">
-            <a className="film-act" href={f.url} target="_blank" rel="noreferrer" title="在线播放">
-              ▶
-            </a>
-            <a
-              className="film-act"
-              href={`${f.url}?download=1`}
-              title="下载"
-              download
-            >
-              ⬇
-            </a>
-            <button
-              className="film-act film-del"
-              title="删除"
-              disabled={busy === f.file}
-              onClick={() => handleDelete(f.file)}
-            >
-              {busy === f.file ? "…" : "✕"}
-            </button>
-          </div>
+          {playing === f.file && (
+            <div className="film-player">
+              {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+              <video src={f.url} poster={`${f.url}?poster=1`} controls autoPlay />
+            </div>
+          )}
         </div>
       ))}
     </section>

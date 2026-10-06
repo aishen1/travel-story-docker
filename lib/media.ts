@@ -78,3 +78,24 @@ export async function deleteMediaBlob(id: string): Promise<void> {
     console.warn("[travel-story] 删除服务端素材失败", e);
   }
 }
+
+/** 行程导出（zip：行程 JSON + 素材 + 背景音乐） */
+export function exportUrl(tripId: string): string {
+  return `/api/export?tripId=${encodeURIComponent(tripId)}`;
+}
+
+/** 从 zip 导回行程（id 冲突时服务端会另起一个，不覆盖现有行程） */
+export async function importTripZip(
+  file: File
+): Promise<{ tripId: string; name: string; media: number; bgm: boolean; renamed: boolean }> {
+  const res = await fetch("/api/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/zip" },
+    body: file,
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new Error(json?.error ?? `导入失败（${res.status}）`);
+  }
+  return json;
+}

@@ -73,6 +73,8 @@ const VIEW_BASE = 720;
 const MEDIA_LEAD_MS = 3800;
 const IMAGE_MS = 2600;
 const VIDEO_CAP_MS = 15000;
+/** 用户显式指定片段长度时的上限（自己选的片段不按 15 秒砍） */
+const VIDEO_CLIP_MAX_MS = 60000;
 /** 无素材地点的停留时长 */
 const PLAIN_DWELL_MS = 2200;
 /** 素材淡入时长 */
@@ -80,16 +82,48 @@ const MEDIA_FADE_MS = 320;
 /** 最后一份素材播完后的淡出时长（对应 dwellMs 里的 +400ms 尾部） */
 const MEDIA_OUT_FADE_MS = 400;
 
+/** 一份素材在成片里的音频排期（服务端按它把现场原声混进成片） */
+export interface AudioCue {
+  mediaId: string;
+  /** 在成片时间轴上的起点（秒） */
+  filmStartSec: number;
+  /** 从视频的第几秒开始取（秒） */
+  clipStartSec: number;
+  /** 取多少秒 */
+  clipLenSec: number;
+  volume: number;
+}
+
+/** 可上屏的素材：图片预缩后是 canvas/ImageBitmap，视频仍是 <video> */
+type MediaSource = HTMLImageElement | HTMLVideoElement | HTMLCanvasElement | ImageBitmap;
+
 interface PreparedMedia {
   meta: MediaMeta;
-  el: HTMLImageElement | HTMLVideoElement;
+  el: MediaSource;
   /** 这一份素材占用的时长（含视频尾部缓冲） */
   slotMs: number;
+  /** 视频起始位置（毫秒）；图片为 0 */
+  clipStartMs: number;
 }
 
 interface CurrentShot {
   shot: PlaybackShot;
   startedAt: number;
+}
+
+/** 片段参数兜底：起始秒落在 [0, 片长-0.5s] */
+function clampClipStartMs(startSec: number | undefined, durMs: number): number {
+  if (!Number.isFinite(startSec ?? NaN) || !startSec || startSec <= 0) return 0;
+  return Math.max(0, Math.min(startSec * 1000, Math.max(0, durMs - 500)));
+}
+
+/** 片段长度兜底：显式指定就不套 15 秒上限（只受绝对上限约束），否则按 15 秒上限 */
+function clipLengthMs(lenSec: number | undefined, availMs: number): number {
+  const avail = Math.max(0, availMs);
+  if (Number.isFinite(lenSec ?? NaN) && (lenSec ?? 0) > 0) {
+    return Math.min(lenSec! * 1000, avail, VIDEO_CLIP_MAX_MS);
+  }
+  return Math.min(avail, VIDEO_CAP_MS);
 }
 
 export interface Compositor {
@@ -108,6 +142,11 @@ export interface Compositor {
   renderFrame(now: number): Promise<void>;
   /** 该帧画面是否与静止时完全相同（静态帧去重用）：视频素材、素材淡入、片尾渐显期间返回 false */
   isStaticFrame(now: number): boolean;
+  /**
+   * 当前帧若有「要保留原声的视频素材」在播，返回它的音频排期。
+   * 逐帧渲染通道本身没有音轨，渲染泵逐帧收集这些排期交给服务端混音。
+   */
+  audioCue(now: number): AudioCue | null;
   start(): void;
   stop(): void;
 }
@@ -119,6 +158,7 @@ export function createCompositor({
   format = "landscape",
   quality = "1080",
   fps = FPS,
+  onPrepareProgress,
 }: {
   engine: TravelMapEngine;
   trip: Trip;
@@ -130,6 +170,8 @@ export function createCompositor({
   quality?: VideoQuality;
   /** 实时模式的合成/采集帧率（离线模式不用） */
   fps?: number;
+  /** 素材预载进度（done/total）：素材多时录制页靠它显示「加载素材 12/36」 */
+  onPrepareProgress?: (done: number, total: number) => void;
 }): Compositor {
   const spec = videoSpec(format, quality);
   const canvas = document.createElement("canvas");
@@ -174,34 +216,78 @@ export function createCompositor({
     });
   }
 
-  // ---- 预载：字幕渲染器（字体 + 载具插画）→ 图片 decode、视频读元数据拿时长 ----
+  /** 图片预缩的目标长边：就是输出画幅的长边。
+   *  合成器用 contain 铺满画幅（不裁切、不放大），所以源图长边等于输出长边
+   *  就是无损上限；再大只是白占内存 —— 4096×3072 的照片解出来约 50MB 位图，
+   *  28 张就是 1.4GB，浏览器直接崩。预缩后一张约 11MB。 */
+  const MAX_IMG_PX = Math.max(spec.w, spec.h);
+
+  // ---- 预载：字幕渲染器（字体 + 载具插画）→ 图片预缩、视频读元数据拿时长 ----
   // 场记字幕/行程点标记与播放页共用同一渲染器（lib/map/captions.ts），
-  // 演示什么样，成片就什么样
+  // 演示什么样，成片就什么样。
+  // 逐份串行（不是 Promise.all）：把解码峰值压在单张图之内，
+  // 顺带给录制页一个准确的「加载素材 x/N」进度。
   const captions = createCaptionRenderer(trip);
   const ready = (async () => {
     await captions.ready;
-    await Promise.all(
-      trip.stops.map(async (stop) => {
-        const list = stop.media ?? [];
-        if (!list.length) return;
-        const prepared = await Promise.all(list.map(prepare));
-        mediaPlan.set(
-          stop.id,
-          prepared.filter((p): p is PreparedMedia => !!p)
-        );
-      })
-    );
+    const jobs: { stopId: string; meta: MediaMeta }[] = [];
+    for (const stop of trip.stops) {
+      for (const meta of stop.media ?? []) jobs.push({ stopId: stop.id, meta });
+    }
+    let done = 0;
+    for (const job of jobs) {
+      const prepared = await prepare(job.meta);
+      if (prepared) {
+        const list = mediaPlan.get(job.stopId) ?? [];
+        list.push(prepared);
+        mediaPlan.set(job.stopId, list);
+      }
+      done += 1;
+      onPrepareProgress?.(done, jobs.length);
+    }
   })();
+
+  /** 图片：取回 → 解码 → 超过输出长边就预缩 → 立刻释放原图位图 */
+  async function prepareImage(meta: MediaMeta, url: string): Promise<PreparedMedia | null> {
+    if (typeof createImageBitmap === "function") {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        const bitmap = await createImageBitmap(blob);
+        const long = Math.max(bitmap.width, bitmap.height);
+        if (long > MAX_IMG_PX) {
+          const scale = MAX_IMG_PX / long;
+          const box = document.createElement("canvas");
+          box.width = Math.max(1, Math.round(bitmap.width * scale));
+          box.height = Math.max(1, Math.round(bitmap.height * scale));
+          const bctx = box.getContext("2d");
+          if (bctx) {
+            bctx.drawImage(bitmap, 0, 0, box.width, box.height);
+            bitmap.close();
+            return { meta, el: box, slotMs: IMAGE_MS, clipStartMs: 0 };
+          }
+        }
+        return {
+          meta,
+          el: bitmap as unknown as HTMLImageElement,
+          slotMs: IMAGE_MS,
+          clipStartMs: 0,
+        };
+      } catch (e) {
+        console.warn("[travel-story] 图片预缩失败，回退 <img>", e);
+      }
+    }
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    return { meta, el: img, slotMs: IMAGE_MS, clipStartMs: 0 };
+  }
 
   async function prepare(meta: MediaMeta): Promise<PreparedMedia | null> {
     const url = mediaUrl(meta.id);
     try {
-      if (meta.kind === "image") {
-        const img = new Image();
-        img.src = url;
-        await img.decode();
-        return { meta, el: img, slotMs: IMAGE_MS };
-      }
+      if (meta.kind === "image") return await prepareImage(meta, url);
       const video = document.createElement("video");
       video.src = url;
       video.muted = true;
@@ -216,7 +302,10 @@ export function createCompositor({
         video.onerror = () => r();
       });
       const durMs = Number.isFinite(video.duration) ? video.duration * 1000 : 5000;
-      return { meta, el: video, slotMs: Math.min(durMs, VIDEO_CAP_MS) + 500 };
+      const clipStartMs = clampClipStartMs(meta.clipStart, durMs);
+      const lenMs = clipLengthMs(meta.clipLen, durMs - clipStartMs);
+      // +500ms 是片段播完后的尾部缓冲（停在最后一帧）
+      return { meta, el: video, slotMs: lenMs + 500, clipStartMs };
     } catch {
       return null;
     }
@@ -294,15 +383,46 @@ export function createCompositor({
   async function renderFrame(now: number) {
     const media = activeMedia(now);
     if (media && media.item.meta.kind === "video") {
-      await seekVideo(media.item.el as HTMLVideoElement, media.tIn / 1000);
+      await seekVideo(
+        media.item.el as HTMLVideoElement,
+        media.item.clipStartMs,
+        media.tIn
+      );
     }
     draw(now);
   }
 
-  /** 视频逐帧定位：偏差 <40ms 不重复 seek；超出片长的尾部缓冲段停在最后一帧 */
-  async function seekVideo(v: HTMLVideoElement, targetSec: number) {
-    const dur = Number.isFinite(v.duration) ? v.duration : targetSec;
-    const target = Math.min(targetSec, Math.max(0, dur - 0.05));
+  /**
+   * 当前帧若有「要保留原声的视频素材」在播，给出它的音频排期。
+   * now - tIn 正好是这一份素材在成片时间轴上的起点。
+   */
+  function audioCue(now: number): AudioCue | null {
+    const media = activeMedia(now);
+    if (!media) return null;
+    const { item, tIn } = media;
+    if (item.meta.kind !== "video") return null;
+    const volume = item.meta.volume ?? 0;
+    if (!(volume > 0)) return null;
+    const v = item.el as HTMLVideoElement;
+    const durMs = Number.isFinite(v.duration) ? v.duration * 1000 : 0;
+    const wantMs = Math.max(0, item.slotMs - 500);
+    const availMs = durMs > 0 ? Math.max(0, durMs - item.clipStartMs) : wantMs;
+    const clipLenMs = Math.min(wantMs, availMs);
+    if (clipLenMs < 200) return null;
+    return {
+      mediaId: item.meta.id,
+      filmStartSec: Math.max(0, (now - tIn) / 1000),
+      clipStartSec: item.clipStartMs / 1000,
+      clipLenSec: clipLenMs / 1000,
+      volume: Math.min(2, Math.max(0, volume)),
+    };
+  }
+
+  /** 视频逐帧定位：偏差 <40ms 不重复 seek；超出片段范围的尾部缓冲段停在最后一帧 */
+  async function seekVideo(v: HTMLVideoElement, clipStartMs: number, tInMs: number) {
+    const durMs = Number.isFinite(v.duration) ? v.duration * 1000 : clipStartMs + tInMs;
+    const targetMs = Math.min(clipStartMs + tInMs, Math.max(0, durMs - 50));
+    const target = targetMs / 1000;
     if (Math.abs(v.currentTime - target) < 0.04) return;
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, 400); // 兜底：丢帧也比卡死强
@@ -400,18 +520,28 @@ export function createCompositor({
   }
 
   /** contain 居中绘制一份素材（尺寸未就绪就跳过） */
-  function drawContained(el: HTMLImageElement | HTMLVideoElement, kind: MediaMeta["kind"]) {
-    const iw = kind === "video"
-      ? (el as HTMLVideoElement).videoWidth
-      : (el as HTMLImageElement).naturalWidth;
-    const ih = kind === "video"
-      ? (el as HTMLVideoElement).videoHeight
-      : (el as HTMLImageElement).naturalHeight;
+  function drawContained(el: MediaSource, kind: MediaMeta["kind"]) {
+    const [iw, ih] = sourceSize(el, kind);
     if (!iw || !ih) return;
     const scale = Math.min(VIEW_W / iw, VIEW_H / ih);
     const dw = iw * scale;
     const dh = ih * scale;
     ctx.drawImage(el, (VIEW_W - dw) / 2, (VIEW_H - dh) / 2, dw, dh);
+  }
+
+  /** 素材的像素尺寸：视频读 videoWidth，图片可能是 <img>/ImageBitmap/预缩 canvas */
+  function sourceSize(el: MediaSource, kind: MediaMeta["kind"]): [number, number] {
+    if (kind === "video") {
+      const v = el as HTMLVideoElement;
+      return [v.videoWidth, v.videoHeight];
+    }
+    const box = el as unknown as {
+      naturalWidth?: number;
+      naturalHeight?: number;
+      width?: number;
+      height?: number;
+    };
+    return [box.naturalWidth ?? box.width ?? 0, box.naturalHeight ?? box.height ?? 0];
   }
 
   /** 角标：地点名 · 序号 */
@@ -434,12 +564,12 @@ export function createCompositor({
     const { item, tIn, idx, total, fadeOut } = media;
     const el = item.el;
 
-    // 实时模式：视频轮到它时从头播起（离线模式由 renderFrame 逐帧 seek）
+    // 实时模式：视频轮到它时从片段起点播起（离线模式由 renderFrame 逐帧 seek）
     if (!offline && item.meta.kind === "video") {
       const v = el as HTMLVideoElement;
       if (activeVideo !== v) {
         if (activeVideo) activeVideo.pause();
-        v.currentTime = 0;
+        v.currentTime = item.clipStartMs / 1000;
         v.play().catch(() => {});
         activeVideo = v;
       }
@@ -517,6 +647,7 @@ export function createCompositor({
     reset,
     renderFrame,
     isStaticFrame,
+    audioCue,
     start() {
       if (!raf) {
         lastDraw = 0;

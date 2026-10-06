@@ -14,8 +14,9 @@ import {
   moveStop,
   setStopTransport,
   setSegmentRoute,
+  updateStopMedia,
 } from "@/lib/store";
-import { deleteMediaBlob, putMediaBlob } from "@/lib/media";
+import { deleteMediaBlob, exportUrl, putMediaBlob } from "@/lib/media";
 import { uid } from "@/lib/uid";
 import type { SearchResult, Transport } from "@/lib/types";
 import { routing } from "@/lib/routing";
@@ -152,6 +153,14 @@ export default function TripPage() {
           <h1 className="font-display">{trip.name}</h1>
         </div>
         <div className="topbar-actions">
+          <a
+            className="btn btn-ghost btn-sm"
+            href={exportUrl(trip.id)}
+            download
+            title="导出这个行程（zip：行程 + 素材 + 背景音乐），可用于备份或换机导入"
+          >
+            ⬇ 导出
+          </a>
           <button
             className="btn btn-ghost btn-sm"
             disabled={trip.stops.length < 2}
@@ -186,6 +195,9 @@ export default function TripPage() {
             onHoverSearch={handleHoverSearch}
             onAddMedia={handleAddMedia}
             onRemoveMedia={handleRemoveMedia}
+            onEditMedia={(stopId, mediaId, patch) =>
+              updateStopMedia(trip.id, stopId, mediaId, patch)
+            }
           />
           {/* 成片库：本行程已生成的纪录片（列表/播放/下载/删除） */}
           <FilmLibrary tripId={trip.id} tripName={trip.name} />

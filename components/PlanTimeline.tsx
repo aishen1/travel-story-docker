@@ -28,6 +28,7 @@ export function PlanTimeline({
   onHoverSearch,
   onAddMedia,
   onRemoveMedia,
+  onEditMedia,
 }: {
   trip: Trip;
   selectedStopId?: string | null;
@@ -41,6 +42,8 @@ export function PlanTimeline({
   onHoverSearch?: (r: import("@/lib/types").SearchResult | null) => void;
   onAddMedia?: (stopId: string, files: File[]) => void;
   onRemoveMedia?: (stopId: string, mediaId: string) => void;
+  /** 保存视频的片段/原声设置 */
+  onEditMedia?: (stopId: string, mediaId: string, patch: Partial<import("@/lib/types").MediaMeta>) => void;
 }) {
   const [addingForDay, setAddingForDay] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
@@ -133,6 +136,7 @@ export function PlanTimeline({
                       stop={stop}
                       onAddFiles={(files) => onAddMedia?.(stop.id, files)}
                       onRemove={(mediaId) => onRemoveMedia?.(stop.id, mediaId)}
+                      onEditClip={(mediaId, patch) => onEditMedia?.(stop.id, mediaId, patch)}
                     />
 
                     {/* 交通方式：只要有下一站就显示（含跨天的那一段）。

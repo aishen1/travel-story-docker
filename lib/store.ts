@@ -410,6 +410,29 @@ export function addStopMedia(tripId: string, stopId: string, meta: MediaMeta) {
   emit();
 }
 
+/** 更新一份素材的元数据（视频的取片段/原声设置走这里） */
+export function updateStopMedia(
+  tripId: string,
+  stopId: string,
+  mediaId: string,
+  patch: Partial<MediaMeta>
+) {
+  const db = loadDB();
+  const trip = db.trips.find((t) => t.id === tripId);
+  if (!trip) return;
+  const stop = trip.stops.find((s) => s.id === stopId);
+  if (!stop) return;
+  const list = stop.media ?? [];
+  const idx = list.findIndex((m) => m.id === mediaId);
+  if (idx < 0) return;
+  list[idx] = { ...list[idx], ...patch };
+  stop.media = list;
+  const merged = normalizeTrip(trip);
+  db.trips[db.trips.indexOf(trip)] = merged;
+  saveDB();
+  emit();
+}
+
 export function removeStopMedia(tripId: string, stopId: string, mediaId: string) {
   const db = loadDB();
   const trip = db.trips.find((t) => t.id === tripId);

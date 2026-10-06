@@ -41,6 +41,22 @@ docker compose up -d --build
 | `app/trip/[id]/record/page.tsx` | 录制页新增「背景音乐」选择（上传/试听/更换/移除） |
 | `Dockerfile` | 运行阶段加 `libheif-examples`（heif-convert） |
 | `app/globals.css` | 成片库、跨天路段标签、背景音乐行的样式 |
+| `lib/types.ts` (v3) | `MediaMeta` 增加 `clipStart` / `clipLen` / `volume` |
+| `lib/store.ts` (v3) | 新增 `updateStopMedia()` |
+| `lib/record/compositor.ts` (v3) | 图片预缩 + 串行预载与进度回调；片段时长窗口；`audioCue()` 收集现场原声排期 |
+| `lib/renderJobs.ts` (v3) | 新增。渲染任务上报（`startRenderJob` / 节流上报器 / 列表 / 清理） |
+| `lib/server/filmFinish.ts` (v3) | 新增。成片收尾：混音（现场原声 + 配乐）+ 抽海报 |
+| `lib/server/zip.ts` (v3) | 新增。自写 zip 读写（store 写 + CRC 回填；解压支持 deflate） |
+| `app/api/render-jobs/route.ts` (v3) | 新增。渲染任务 GET/POST/PATCH/DELETE |
+| `app/api/export/route.ts` (v3) | 新增。行程导出 zip（流式，自动清理旧导出） |
+| `app/api/import/route.ts` (v3) | 新增。行程导入 zip（冲突改名、类型嗅探） |
+| `app/api/recordings/[file]/route.ts` (v3) | 新增 `?poster=1` 取成片海报 |
+| `components/FilmLibrary.tsx` (v3) | 加封面海报 + 页内播放器 |
+| `components/StopMedia.tsx` (v3) | 加片段编辑器（✂ 起始/时长/音量） |
+| `app/page.tsx` (v3) | 加「⬆ 导入行程」 |
+| `app/trip/[id]/page.tsx` (v3) | 加「⬇ 导出」、片段编辑入口 |
+| `app/trip/[id]/record/page.tsx` (v3) | 加素材加载进度、上次渲染中断提示与清理 |
+| `lib/server/db.ts` (v3) | 帧目录/TMP 清理、渲染任务落库、海报路径、成片删除连带海报 |
 
 ## 四、非容器相关的代码级修复（本版新增，均已实测）
 
@@ -115,9 +131,9 @@ Dockerfile 因此增加 `libheif-examples`（`heif-convert`，apt 约 2.5 分钟
 素材一多页面就长时间停在「预热中」。改为 `preload="metadata"`：只要时长信息，
 真正要用的帧在渲染时按 Range 请求拉（服务端 `/api/media/<id>` 支持 206），一次只取一小段。
 
-> **遗留（未改，属设计层面）**：图片仍是整张 `img.decode()`，4096×3072 的原图解码后
-> 约 50MB 位图，几十张就是 GB 级内存。后续可以改 `createImageBitmap(img, { resizeWidth })`
-> 预缩到输出画幅量级再绘制。普通家用机跑得动，低配客户端要留意。
+> **已修（v3 第 1 项）**：图片原来整张 `img.decode()`，4096×3072 的原图解码后约 50MB 位图，
+> 几十张就是 GB 级内存。现在改为 `createImageBitmap` → 画布预缩到输出画幅长边 → `bitmap.close()`
+> 立即释放，一张降到约 11MB。详见下节。
 
 **存量素材补缩略图**
 v2 之前的素材没有缩略图（列表会回落拉原图）。补生成：
@@ -128,6 +144,66 @@ docker exec travel-story sh /app/data/backfill-thumbnails.sh
 ```
 
 幂等，可反复跑。注意：回落响应只缓存 60 秒，补完刷新页面即可看到小图。
+
+## 六、v3 新增的七项功能（全部经 37 项脚本 + 真实浏览器实测）
+
+**1. 渲染前图片预缩（降内存）**
+`prepare()` 改为逐张 `createImageBitmap` → 画布缩到输出画幅长边（`MAX_IMG_PX = max(宽, 高)`）
+→ 绘制 → `bitmap.close()` 立即释放。同时把原来的 `Promise.all` 并行预载改成**串行**：
+解码峰值压在单张图内，顺带给出准确的 `x/N` 进度。
+实测（近 30 张手机照片 + 8 段视频，共 36 份素材）：录制页 **37 秒准备完毕**，
+而 v2 时期同一页面会长时间卡在「预热中」并反复把标签页拖崩。
+
+> 顺带：`createImageBitmap` 在局域网 HTTP（非安全上下文）下**是可用的**（与 `crypto.randomUUID`
+> 不同），所以这条降级路径在 LAN 场景也能生效；取不到时回落到 `<img>` 老路径。
+
+**2. 孤儿帧目录自动清理（24 小时）**
+渲染中途关页面/断网会残留 `data/recordings/frames-<session>/`（几万个 JPEG）。
+现在 `GET /api/recordings` 与出片 finalize 都会顺手清掉 24 小时前的这类目录；
+正在渲染的目录（mtime 很新）不会被误删。实测：30 小时前的目录被清、新建的目录保留。
+
+**3. 素材加载进度回传**
+合成器新增 `onPrepareProgress(done, total)`，录制页把「正在准备…」卡片换成
+`正在加载素材 x/N` + 进度条。实测浏览器里 9/36 → 17/36 → 24/36 逐格推进后完成。
+
+**4. 成片库海报 + 页内播放**
+出片时用 ffmpeg 抽首帧存 `<成片名>-poster.jpg`（宽 640），列表项显示封面；
+`GET /api/recordings/<文件>?poster=1` 提供海报；点封面**在页内直接播放**（不再跳新标签页），
+下载走 `?download=1`。
+
+**5. 视频片段选择（起始 / 时长）+ 成片保留现场原声**
+`MediaMeta` 增加 `clipStart` / `clipLen` / `volume`，素材卡片上有 ✂ 编辑器（从第几秒、取多久、
+音量），带 ✂/♪ 角标与摘要文字（如 `5.0s 起 3.0s`）。
+关键点：**音轨由服务端补**——逐帧渲染通道只有画面。浏览器渲染时逐帧收集「哪段视频在原片第几秒、
+取多长、放在成片第几秒」，渲染结束以 base64 JSON 通过 `X-Film-Audio` 头一次性传给服务端；
+服务端用 `atrim` + `volume` + `atrim`+`afade` + `adelay` 摆好后与背景音乐 `amix` 叠加
+（有原声时 BGM 自动降到 0.35 当垫底），视频流 `-c:v copy` 不重编码。
+
+> **两个坑（都踩了才通）**：
+> ① 片段已在**输入侧**用 `-ss/-t` 取好，滤镜里**不能再写 `atrim=start=`** —— 输入 seek 已把
+> 时间戳归零，二次裁剪会把音轨裁空，`-shortest` 接着把画面也一起截掉，
+> 产出几百字节、无任何流的空 MP4（实测 261 字节）。
+> ② 音轨末尾要 `apad` 补静音，否则 `-shortest` 会以**音频**长度为准：
+> 一段 3 秒原声放进 30 秒成片会把成片截成 3 秒（实测 8 秒成片 + 3 秒原声= 8 秒，加 apad 前是 3 秒）。
+
+**6. 渲染任务状态落库（中断可见）**
+渲染开始/每 5 秒/结束都会上报 `POST/PATCH /api/render-jobs`，落 `data/jobs/<id>.json`
+（行程、进度、阶段、格式、帧率、结束状态）。录制页加载时读 `GET /api/render-jobs?tripId=`：
+上次任务是 `running` 且两分钟没上报就判定为「上次渲染中断了」，给出提示与「清理记录」按钮。
+实测：新建 → latest 指向它 → 刚上报不算中断 → 拨快 5 分钟即判中断 → PATCH 改状态 → DELETE 清掉。
+
+**7. 行程导出 / 导入 zip**
+- `GET /api/export?tripId=<id>`：打包**该行程用到的**素材（不是整个媒体库）+ 元数据边车 + 配乐
+  + `trip.json`，先写 `data/tmp` 再流式返回（素材几百 MB，不能读进内存），并清理 2 小时前的旧导出。
+- `POST /api/import`：读 zip 还原行程、素材、边车、配乐；缺边车时按文件头嗅探类型；
+  行程 id 冲突自动改名（`renamed: true`）。上限 `MAX_IMPORT_MB`（默认 2048）。
+- 入口：行程页右上「⬇ 导出」、首页「⬆ 导入行程」。
+- zip 读写是自写的（store 写入 + CRC 回填，解压支持 deflate），不引第三方依赖。
+- 实测：真实行程 738.2MB / 73 个条目（1 个 trip.json + 36 素材 + 36 边车），
+  `unzip -l` 正常；小行程导入往返还原成功且自动改名。
+
+> **不做自动备份**：本项目的行程数据不接入每日备份（用户明确要求）。
+> 需要留档时用页面上的「⬇ 导出」按需导出即可。
 
 ## 已知限制（上游设计如此，非 bug）
 

@@ -76,6 +76,29 @@ function sidecarPath(id: string) {
   return path.join(MEDIA_DIR, `${safeId(id)}.json`);
 }
 
+/** 素材元数据边车路径（导出/导入要用） */
+export function mediaSidecarPath(id: string) {
+  return sidecarPath(id);
+}
+
+export const TMP_DIR = path.join(DATA_DIR, "tmp");
+
+/** 清掉临时目录里超过 maxAgeMs 的临时文件（导出的 zip 等） */
+export async function cleanupOldTmpFiles(maxAgeMs = 2 * 60 * 60 * 1000): Promise<number> {
+  const dirents = await fs.readdir(TMP_DIR, { withFileTypes: true }).catch(() => []);
+  const now = Date.now();
+  let removed = 0;
+  for (const d of dirents) {
+    if (!d.isFile()) continue;
+    const full = path.join(TMP_DIR, d.name);
+    const stat = await fs.stat(full).catch(() => null);
+    if (!stat || now - stat.mtimeMs < maxAgeMs) continue;
+    await fs.unlink(full).catch(() => {});
+    removed += 1;
+  }
+  return removed;
+}
+
 export async function writeMedia(id: string, buf: Buffer, meta: MediaSidecar): Promise<void> {
   await ensureDirs();
   await writeFileAtomic(mediaPath(id), buf);
@@ -229,6 +252,10 @@ export interface RecordingSidecar {
   /** 秒 */
   duration?: number;
   bgm?: boolean;
+  /** 混入的现场原声段数 */
+  clips?: number;
+  /** 是否生成了海报（首帧封面） */
+  poster?: boolean;
   /** 该片的源帧数（逐帧渲染路径记录） */
   frames?: number;
   createdAt?: number;
@@ -265,7 +292,121 @@ export async function deleteRecording(file: string): Promise<boolean> {
     existed = false;
   });
   await fs.unlink(recordingSidecarPath(name)).catch(() => {});
+  // 成片海报（首帧）一并清掉
+  await fs.unlink(posterPath(name)).catch(() => {});
   return existed;
+}
+
+/** 成片海报：<名字>-poster.jpg，成片库里当封面用 */
+export function posterPath(file: string) {
+  const base = path.basename(file).replace(/\.(mp4|webm)$/i, "");
+  return path.join(RECORDINGS_DIR, `${base}-poster.jpg`);
+}
+
+// ------------------------------------------------------------
+// 渲染任务（每行程最近一次出片的状态，供录制页显示/中断可见）
+//
+// 逐帧渲染的帧在浏览器里，刷新后无法续渲；这里记录的是「这次渲染
+// 跑到哪、怎么结束的」，让中断可见、残留帧可清，而不是无声消失。
+// ------------------------------------------------------------
+
+export const JOBS_DIR = path.join(DATA_DIR, "jobs");
+
+export interface RenderJob {
+  id: string;
+  tripId?: string;
+  tripName?: string;
+  status: "running" | "done" | "error" | "aborted";
+  phase?: string;
+  rendered: number;
+  total: number;
+  startedAt: number;
+  updatedAt: number;
+  file?: string;
+  url?: string;
+  size?: number;
+  bgm?: boolean;
+  clips?: number;
+  format?: string;
+  quality?: string;
+  fps?: number;
+  error?: string;
+}
+
+const jobPath = (id: string) => path.join(JOBS_DIR, `${safeJobId(id)}.json`);
+
+const safeJobId = (id: string) => {
+  if (!/^[\w-]{1,64}$/.test(id)) throw new Error(`非法任务 id: ${id}`);
+  return id;
+};
+
+export async function writeJob(job: RenderJob): Promise<void> {
+  await ensureDirs();
+  await fs.mkdir(JOBS_DIR, { recursive: true });
+  await writeFileAtomic(jobPath(job.id), JSON.stringify(job));
+}
+
+export async function readJob(id: string): Promise<RenderJob | null> {
+  try {
+    return JSON.parse(await fs.readFile(jobPath(id), "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+export async function listJobs(tripId?: string): Promise<RenderJob[]> {
+  const dirents = await fs.readdir(JOBS_DIR, { withFileTypes: true }).catch(() => []);
+  const out: RenderJob[] = [];
+  for (const d of dirents) {
+    if (!d.isFile() || !d.name.endsWith(".json")) continue;
+    const job = await readJob(d.name.replace(/\.json$/, ""));
+    if (!job) continue;
+    if (tripId && job.tripId !== tripId) continue;
+    out.push(job);
+  }
+  out.sort((a, b) => b.startedAt - a.startedAt);
+  return out.slice(0, 20);
+}
+
+export async function deleteJobs(filter?: { id?: string; tripId?: string }): Promise<number> {
+  const dirents = await fs.readdir(JOBS_DIR, { withFileTypes: true }).catch(() => []);
+  let removed = 0;
+  for (const d of dirents) {
+    if (!d.isFile() || !d.name.endsWith(".json")) continue;
+    const id = d.name.replace(/\.json$/, "");
+    if (filter?.id) {
+      if (id !== filter.id) continue;
+    } else if (filter?.tripId) {
+      const job = await readJob(id);
+      if (!job || job.tripId !== filter.tripId) continue;
+    }
+    await fs.unlink(path.join(JOBS_DIR, d.name)).catch(() => {});
+    removed += 1;
+  }
+  return removed;
+}
+
+// ------------------------------------------------------------
+// 孤儿帧目录清理
+//
+// 逐帧渲染会把 JPEG 帧攒在 data/recordings/frames-<会话>/，正常结束由
+// finalize 删掉；但渲染中途关页面 / 浏览器崩了就没有人删，几十上百 MB
+// 会一直留在盘上。这里按「最后修改时间超过 maxAgeMs」判定为孤儿。
+// ------------------------------------------------------------
+
+export async function cleanupStaleFrameDirs(maxAgeMs = 24 * 60 * 60 * 1000): Promise<number> {
+  const dirents = await fs.readdir(RECORDINGS_DIR, { withFileTypes: true }).catch(() => []);
+  const now = Date.now();
+  let removed = 0;
+  for (const d of dirents) {
+    if (!d.isDirectory() || !d.name.startsWith("frames-")) continue;
+    const full = path.join(RECORDINGS_DIR, d.name);
+    const stat = await fs.stat(full).catch(() => null);
+    if (!stat || now - stat.mtimeMs < maxAgeMs) continue;
+    await fs.rm(full, { recursive: true, force: true }).catch(() => {});
+    removed += 1;
+  }
+  return removed;
 }
 
 export interface RecordingEntry extends RecordingSidecar {

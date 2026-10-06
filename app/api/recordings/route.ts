@@ -9,18 +9,15 @@ import { execFile } from "child_process";
 import { promises as fs } from "fs";
 import path from "path";
 import {
+  cleanupStaleFrameDirs,
   deleteRecording,
   ensureDirs,
-  findBgm,
   listRecordings,
   RECORDINGS_DIR,
   writeRecordingSidecar,
 } from "@/lib/server/db";
-import {
-  muxBackgroundMusic,
-  probeDuration,
-  validateMedia,
-} from "@/lib/server/mediaTools";
+import { finishFilm, parseAudioPlan } from "@/lib/server/filmFinish";
+import { probeDuration, validateMedia } from "@/lib/server/mediaTools";
 import {
   RequestTooLargeError,
   getLimitBytes,
@@ -65,31 +62,27 @@ function transcodeToMp4(input: string, output: string): Promise<void> {
 }
 
 /**
- * 该行程配了背景音乐就混进成片：先写临时文件，校验通过才替换原片，
- * 任何一步失败都保留无声版本（宁缺音乐，不可丢片子）。
+ * 该行程配了背景音乐 / 带现场原声就混进成片：先写临时文件，校验通过才替换
+ * 原片，任何一步失败都保留无声版本（宁缺音乐，不可丢片子）。
  */
-async function applyBgm(filePath: string, file: string, tripId: string): Promise<boolean> {
-  if (!tripId) return false;
-  const bgm = await findBgm(tripId);
-  if (!bgm) return false;
-  const tmp = `${filePath}.bgm.mp4`;
-  try {
-    await muxBackgroundMusic(filePath, bgm.path, tmp);
-    await validateMedia(tmp);
-    await fs.rename(tmp, filePath);
-    console.log(`[recordings] 已混入背景音乐：${bgm.meta.name} → ${file}`);
-    return true;
-  } catch (e) {
-    await fs.unlink(tmp).catch(() => {});
-    console.warn("[recordings] 背景音乐混流失败，保留无声成片", e);
-    return false;
+async function applyAudio(
+  filePath: string,
+  tripId: string,
+  clips: ReturnType<typeof parseAudioPlan>
+) {
+  if (!tripId && !clips.length) {
+    return { bgm: false, clips: 0, poster: false, skipped: 0 };
   }
+  return finishFilm({ filePath, file: path.basename(filePath), tripId: tripId || undefined, clips });
 }
 
 export async function GET(req: NextRequest) {
   const tripId = req.nextUrl.searchParams.get("tripId") ?? undefined;
   const tripName = req.nextUrl.searchParams.get("trip") ?? undefined;
   try {
+    // 顺手清掉渲染中途挂掉留下的孤儿帧目录（>24h），别让它一直占盘
+    const purged = await cleanupStaleFrameDirs().catch(() => 0);
+    if (purged) console.log(`[recordings] 清理孤儿帧目录 ${purged} 个`);
     const files = await listRecordings(tripId ? { tripId, tripName } : undefined);
     return Response.json({ ok: true, files });
   } catch (e) {
@@ -157,13 +150,16 @@ export async function POST(req: NextRequest) {
     }
 
     const fullPath = path.join(RECORDINGS_DIR, finalFile);
-    const bgmApplied = await applyBgm(fullPath, finalFile, tripId);
+    const clips = parseAudioPlan(req.headers.get("x-film-audio"));
+    const audio = await applyAudio(fullPath, tripId, clips);
     const stat = await fs.stat(fullPath);
     await writeRecordingSidecar(finalFile, {
       tripId: tripId || undefined,
       tripName,
       duration: (await probeDuration(fullPath)) ?? undefined,
-      bgm: bgmApplied,
+      bgm: audio.bgm,
+      clips: audio.clips,
+      poster: audio.poster,
       createdAt: Date.now(),
     });
     return Response.json({
@@ -171,7 +167,9 @@ export async function POST(req: NextRequest) {
       file: finalFile,
       url: `/api/recordings/${finalFile}`,
       size: stat.size,
-      bgm: bgmApplied,
+      bgm: audio.bgm,
+      clips: audio.clips,
+      poster: audio.poster,
     });
   } catch (e) {
     if (e instanceof RequestTooLargeError) {

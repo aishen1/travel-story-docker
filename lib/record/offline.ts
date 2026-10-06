@@ -28,8 +28,9 @@ import { uid } from "@/lib/uid";
 import type { Timeline } from "@/lib/map/playback";
 import type { TravelMapEngine } from "@/lib/map/engine";
 import type { Trip } from "@/lib/types";
-import type { Compositor } from "./compositor";
+import type { Compositor, AudioCue, VideoFormat, VideoQuality } from "./compositor";
 import { prewarmTimeline, settle, type MapInstance } from "./prewarm";
+import { createJobReporter, startRenderJob, type JobReporter } from "@/lib/renderJobs";
 import { Muxer, ArrayBufferTarget } from "mp4-muxer";
 /** 片尾字幕时长（与实时录制一致） */
 const OUTRO_MS = 2600;
@@ -51,6 +52,10 @@ export interface OfflineRenderResult {
   size: number;
   /** 服务端是否成功混入背景音乐 */
   bgm?: boolean;
+  /** 混入的现场原声段数 */
+  clips?: number;
+  /** 是否生成了海报 */
+  poster?: boolean;
 }
 
 export type RenderPhase = "prewarm" | "render" | "encode";
@@ -84,6 +89,8 @@ export function renderOffline({
   width,
   height,
   fps,
+  format,
+  quality,
   onProgress,
 }: {
   engine: TravelMapEngine;
@@ -94,6 +101,9 @@ export function renderOffline({
   height: number;
   /** 输出帧率：60 丝滑 / 30 快速（帧数减半，渲染快一倍） */
   fps: number;
+  /** 输出规格（只用于渲染任务上报，可省略） */
+  format?: VideoFormat;
+  quality?: VideoQuality;
   onProgress(rendered: number, total: number, phase: RenderPhase): void;
 }): OfflineRenderer {
   let cancelled = false;
@@ -101,9 +111,17 @@ export function renderOffline({
     let session = "";
     let yieldChannel: MessageChannel | null = null;
     let usedWebCodecs = false;
+    let reporter: JobReporter = createJobReporter(null);
     const frameMs = 1000 / fps;
     const map = engine.map;
     const t0 = performance.now();
+    /** 现场原声排期：每份视频素材只记一次 */
+    const audioCues: AudioCue[] = [];
+    const audioSeen = new Set<string>();
+    const audioHeader = () =>
+      audioCues.length
+        ? { "X-Film-Audio": btoa(JSON.stringify(audioCues)) }
+        : ({} as Record<string, string>);
     try {
       // 重试会复用合成器；先清掉上一遍可能留下的片尾/素材状态。
       compositor.reset();
@@ -117,13 +135,25 @@ export function renderOffline({
       const totalFrames =
         Math.ceil(tl.totalMs / frameMs) + Math.ceil(OUTRO_MS / frameMs);
 
+      // 1.5 渲染任务上报：刷新回来能看到「上次跑到哪、怎么结束的」
+      reporter = createJobReporter(
+        await startRenderJob({
+          tripId: trip.id,
+          tripName: trip.name,
+          total: totalFrames,
+          format,
+          quality,
+          fps,
+        })
+      );
+
       // 2. 输出通道：WebCodecs 软件 H.264，不可用则 JPEG 帧序列兜底
       const encConfig = forceJpeg ? null : await pickEncoderConfig(width, height, fps);
       usedWebCodecs = Boolean(encConfig);
       session = uid();
       const sink: FrameSink = encConfig
-        ? createWebCodecsSink(encConfig, width, height, fps, trip.name, trip.id)
-        : createJpegSink(session, trip.name, fps, trip.id);
+        ? createWebCodecsSink(encConfig, width, height, fps, trip.name, trip.id, audioHeader)
+        : createJpegSink(session, trip.name, fps, trip.id, audioHeader);
       console.log(
         "[travel-story] 渲染通道:",
         encConfig
@@ -206,6 +236,12 @@ export function renderOffline({
 
         const reuse =
           i > 0 && canReuseFrame(map, tl, compositor, tMs, currentShotStart);
+        // 现场原声：这一帧若轮到带原声的视频，记下它在成片里的位置与片段范围
+        const cue = compositor.audioCue(tMs);
+        if (cue && !audioSeen.has(cue.mediaId)) {
+          audioSeen.add(cue.mediaId);
+          audioCues.push(cue);
+        }
         if (reuse) {
           reused++;
         } else {
@@ -217,6 +253,7 @@ export function renderOffline({
         await sink.addFrame(i, compositor.canvas, reuse);
         await yieldTask();
         onProgress(i + 1, totalFrames, "render");
+        reporter.progress(i + 1, totalFrames, "render");
       }
       const renderMs = performance.now() - tRender;
       if (cancelled) {
@@ -226,6 +263,7 @@ export function renderOffline({
 
       // 6. 收尾产出 MP4
       onProgress(totalFrames, totalFrames, "encode");
+      reporter.progress(totalFrames, totalFrames, "encode");
       const tEncode = performance.now();
       const result = await sink.finalize();
       console.log(
@@ -234,8 +272,17 @@ export function renderOffline({
           `收尾 ${((performance.now() - tEncode) / 1000).toFixed(1)}s · ` +
           `总计 ${((performance.now() - t0) / 1000).toFixed(1)}s`
       );
+      await reporter.done({
+        file: result.file,
+        url: result.url,
+        size: result.size,
+        bgm: result.bgm,
+        clips: result.clips,
+      });
       return result;
     } catch (e) {
+      if (cancelled) await reporter.abort();
+      else await reporter.fail(e instanceof Error ? e.message : String(e));
       if (usedWebCodecs && !forceJpeg && !cancelled) {
         throw new WebCodecsOutputError(e);
       }
@@ -314,7 +361,8 @@ function createWebCodecsSink(
   height: number,
   fps: number,
   tripName: string,
-  tripId: string
+  tripId: string,
+  getAudioHeader: () => Record<string, string>
 ): FrameSink {
   const muxer = new Muxer({
     target: new ArrayBufferTarget(),
@@ -357,7 +405,7 @@ function createWebCodecsSink(
         `/api/recordings?trip=${encodeURIComponent(tripName)}&tripId=${encodeURIComponent(tripId)}&ext=mp4`,
         {
           method: "POST",
-          headers: { "Content-Type": "video/mp4" },
+          headers: { "Content-Type": "video/mp4", ...getAudioHeader() },
           body: muxer.target.buffer,
         }
       );
@@ -379,7 +427,13 @@ function createWebCodecsSink(
 // 通道 A+B：JPEG 帧序列（兜底；编码与上传全部后台并行）
 // ------------------------------------------------------------
 
-function createJpegSink(session: string, tripName: string, fps: number, tripId: string): FrameSink {
+function createJpegSink(
+  session: string,
+  tripName: string,
+  fps: number,
+  tripId: string,
+  getAudioHeader: () => Record<string, string>
+): FrameSink {
   /** 每批上传的帧数（约 1 秒视频） */
   const BATCH = fps;
   let batch: { idx: number; blob: Blob }[] = [];
@@ -453,7 +507,7 @@ function createJpegSink(session: string, tripName: string, fps: number, tripId: 
       }
       const res = await fetch(
         `/api/recordings/frames?session=${session}&finalize=1&trip=${encodeURIComponent(tripName)}&tripId=${encodeURIComponent(tripId)}&fps=${fps}`,
-        { method: "POST" }
+        { method: "POST", headers: getAudioHeader() }
       );
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);

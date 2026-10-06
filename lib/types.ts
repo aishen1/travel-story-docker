@@ -88,6 +88,16 @@ export interface MediaMeta {
   /** 原始文件名（仅展示用） */
   name: string;
   createdAt: number;
+  /** 视频：从第几秒开始取（默认 0，即从头） */
+  clipStart?: number;
+  /** 视频：取多少秒（不填 = 到片尾，仍受 15 秒上限约束） */
+  clipLen?: number;
+  /**
+   * 视频：现场原声音量（0/不填 = 静音，1 = 原声）。
+   * 注意原声不是浏览器录进去的——逐帧渲染通道没有音轨，
+   * 是由服务端在合成时按同一份排期把原声混进成片的。
+   */
+  volume?: number;
 }
 
 /** 路段几何（需求文档 §45：GeoJSON LineString） */

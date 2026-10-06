@@ -6,8 +6,9 @@ import { NextRequest } from "next/server";
 import { execFile } from "child_process";
 import { promises as fs } from "fs";
 import path from "path";
-import { ensureDirs, findBgm, isTripId, RECORDINGS_DIR, writeRecordingSidecar } from "@/lib/server/db";
-import { muxBackgroundMusic, probeDuration, validateMedia } from "@/lib/server/mediaTools";
+import { ensureDirs, cleanupStaleFrameDirs, isTripId, RECORDINGS_DIR, writeRecordingSidecar } from "@/lib/server/db";
+import { finishFilm, parseAudioPlan } from "@/lib/server/filmFinish";
+import { probeDuration } from "@/lib/server/mediaTools";
 import {
   declaredBodyExceeds,
   getLimitBytes,
@@ -51,22 +52,16 @@ export async function POST(req: NextRequest) {
         return Response.json({ error: "missing-frames" }, { status: 400 });
       }
       await assemble(dir, outPath, fps);
-      // 配了背景音乐就混进去（失败保留无声版本，绝不因此丢掉片子）
-      const bgm = isTripId(tripId) ? await findBgm(tripId) : null;
-      let bgmApplied = false;
-      if (bgm) {
-        const tmp = `${outPath}.bgm.mp4`;
-        try {
-          await muxBackgroundMusic(outPath, bgm.path, tmp);
-          await validateMedia(tmp);
-          await fs.rename(tmp, outPath);
-          bgmApplied = true;
-          console.log(`[recordings] 已混入背景音乐：${bgm.meta.name} → ${finalFile}`);
-        } catch (e) {
-          await fs.unlink(tmp).catch(() => {});
-          console.warn("[recordings] 背景音乐混流失败，保留无声成片", e);
-        }
-      }
+      // 音轨（背景音乐 + 现场原声）+ 海报；失败保留无声版本，绝不丢片子
+      const clips = parseAudioPlan(req.headers.get("x-film-audio"));
+      const audio = await finishFilm({
+        filePath: outPath,
+        file: finalFile,
+        tripId: isTripId(tripId) ? tripId : undefined,
+        clips,
+      });
+      // 顺手清掉别的会话留下的孤儿帧目录（>24h）
+      await cleanupStaleFrameDirs().catch(() => 0);
       await fs.rm(dir, { recursive: true, force: true });
       const stat = await fs.stat(outPath);
       await writeRecordingSidecar(finalFile, {
@@ -74,7 +69,9 @@ export async function POST(req: NextRequest) {
         tripName,
         fps,
         duration: (await probeDuration(outPath)) ?? undefined,
-        bgm: bgmApplied,
+        bgm: audio.bgm,
+        clips: audio.clips,
+        poster: audio.poster,
         createdAt: Date.now(),
         frames: frameCount,
       });
@@ -83,7 +80,9 @@ export async function POST(req: NextRequest) {
         file: finalFile,
         url: `/api/recordings/${finalFile}`,
         size: stat.size,
-        bgm: bgmApplied,
+        bgm: audio.bgm,
+        clips: audio.clips,
+        poster: audio.poster,
       });
     }
 
